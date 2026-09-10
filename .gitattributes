@@ -1,0 +1,17 @@
+# Line endings are decided here, not by whatever core.autocrlf each machine
+# happens to have. Everything text is stored AND checked out as LF: this is a
+# Node tool that runs on Windows and Linux, and the SQL scripts it generates
+# get pasted into mysql clients on both.
+* text=auto eol=lf
+
+# Belt and braces - never let content detection guess on these.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.woff binary
+*.woff2 binary
+
+# Generated: collapsed in review, excluded from language stats.
+package-lock.json linguist-generated=true
