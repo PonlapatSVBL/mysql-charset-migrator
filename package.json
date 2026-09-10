@@ -1,0 +1,20 @@
+{
+  "name": "mysql-charset-migrator",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local-only console to inventory, verify and migrate MySQL CHARACTER SET / COLLATION (target: utf8mb3 / utf8mb3_general_ci)",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "selftest": "node scripts/selftest.js",
+    "check": "node scripts/check-imports.js && node scripts/selftest.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "mysql2": "^3.11.5"
+  }
+}

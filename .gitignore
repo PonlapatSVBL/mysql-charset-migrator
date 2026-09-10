@@ -1,0 +1,35 @@
+# dependencies
+node_modules/
+
+# Runtime state. Everything this tool writes about a real database lives here:
+# audit logs, job manifests, checksum snapshots, generated plans. It can name
+# hosts, users, schemas and table contents, so it never goes into git.
+data/
+
+# secrets
+.env
+.env.*
+!.env.example
+
+# logs
+*.log
+npm-debug.log*
+
+# temporary UI harnesses (public/_smoke.html, public/_probe.js, ...)
+public/_*
+
+# tooling caches
+.impeccable/
+.playwright-mcp/
+coverage/
+
+# editors
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
