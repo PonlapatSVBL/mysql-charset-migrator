@@ -55,6 +55,15 @@
     </main>
   </div>
 
+  <div id="busy" class="modal-backdrop" hidden>
+    <div class="modal busy-modal" role="alertdialog" aria-live="assertive" aria-labelledby="busy-text">
+      <span class="busy-spin" aria-hidden="true"></span>
+      <strong id="busy-text">กำลังทำงาน</strong>
+      <span class="busy-sub" id="busy-sub">อย่าปิดหน้านี้ ระบบกำลังประมวลผล</span>
+      <button class="btn-sm btn-danger" id="busy-cancel" hidden>ยกเลิก</button>
+    </div>
+  </div>
+
   <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
   <div id="modal-root"></div>
 

@@ -44,7 +44,7 @@ export function tableState(key) {
       checksumId: null, checksumAt: null,
       planId: null, planAt: null,
       jobId: null, jobStatus: null,
-      verifyId: null, verifyOk: null,
+      verifyId: null, verifyOk: null, verifyAppended: 0,
     };
   }
   return work.byTable[key];

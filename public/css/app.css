@@ -105,6 +105,7 @@
   --t-stat:  22px;
 
   /* ---- rhythm ------------------------------------------------------------ */
+  --sidebar-w: 254px;
   --s1: 4px;  --s2: 8px;  --s3: 12px; --s4: 16px; --s5: 22px; --s6: 30px;
   --r-sm: calc(var(--radius) - 4px); --r-md: calc(var(--radius) - 2px); --r-lg: var(--radius);
 
@@ -134,6 +135,9 @@ body {
   -webkit-font-smoothing: antialiased;
   text-size-adjust: 100%;
 }
+/* An author `display` rule outranks the UA sheet's [hidden], which is how a
+   permanently visible "busy" banner happens. Settle it once, for everything. */
+[hidden] { display: none !important; }
 ::selection { background: var(--accent-dim); color: var(--fg); }
 a { color: var(--accent-hi); text-underline-offset: 2px; }
 a:hover { color: var(--fg); }
@@ -170,7 +174,7 @@ h1, h2, h3, h4 { text-wrap: balance; }
    min-content height from a long report, the document scrolls, and the nav and
    topbar scroll away with it. Only .view should ever scroll. */
 .app {
-  display: grid; grid-template-columns: 254px 1fr; grid-template-rows: minmax(0, 1fr);
+  display: grid; grid-template-columns: var(--sidebar-w) 1fr; grid-template-rows: minmax(0, 1fr);
   height: 100vh; height: 100dvh; overflow: hidden;
 }
 
@@ -633,6 +637,26 @@ details.step[open] .step-title { color: var(--fg); }
 .status-dot.failed { background: var(--crit); }
 .status-dot.pending { background: var(--fg-mute); }
 .status-dot.rolled_back { background: var(--warn); }
+/* ---------------------------------------------------------------- busy lock
+   A task is running: it says so in the middle of the screen, over a backdrop
+   that stops every click behind it. The nav is made inert as well, for the
+   keyboard path around the backdrop. */
+body.busy #nav, body.busy .conn-card { pointer-events: none; }
+/* Two class selectors: .modal's own width rule is later in the file and would
+   otherwise win at equal specificity. */
+.modal.busy-modal {
+  width: min(380px, 100%); text-align: center;
+  display: grid; justify-items: center; gap: var(--s3); padding: var(--s6) var(--s5);
+}
+.busy-modal strong { font-size: var(--t-h2); font-weight: 650; }
+.busy-modal .busy-sub { color: var(--fg-mute); font-size: var(--t-small); }
+.busy-spin {
+  width: 32px; height: 32px; border-radius: 50%;
+  border: 3px solid var(--track); border-top-color: var(--accent);
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(1turn); } }
+
 @keyframes pulse {
   0%   { box-shadow: 0 0 0 0 color-mix(in oklab, var(--accent) 45%, transparent); }
   70%  { box-shadow: 0 0 0 6px color-mix(in oklab, var(--accent) 0%, transparent); }
@@ -847,8 +871,10 @@ details.stepcard > summary:hover:not(.locked) { background: var(--bg-3); }
 .stepno.done { background: var(--ok-solid); border-color: var(--ok-solid); color: var(--accent-ink); }
 .stepno.problem { background: var(--crit); border-color: var(--crit); color: var(--accent-ink); }
 .stepno.running { background: var(--accent-dim); border-color: var(--accent); color: var(--accent-hi); }
+.stepno.warn { background: var(--warn); border-color: var(--warn); color: var(--fg); }
 details.stepcard.done { border-color: var(--e-ok); }
 details.stepcard.problem { border-color: var(--e-crit); }
+details.stepcard.warn { border-color: var(--e-warn); }
 
 .nav-item.nav-main { font-weight: 650; }
 

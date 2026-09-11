@@ -10,8 +10,8 @@ import {
 } from '../store.js';
 import { navigate } from '../app.js';
 import {
-  $, $$, esc, num, bytes, duration, note, chip, toast, applyDynamicStyles, showModal,
-  confirmDialog, copyToClipboard, levelKind, collapse,
+  $, $$, esc, num, pct, bytes, duration, note, chip, toast, applyDynamicStyles, showModal,
+  confirmDialog, copyToClipboard, levelKind, collapse, setBusy, isBusy,
 } from '../util.js';
 
 let key = null;
@@ -32,11 +32,15 @@ const cache = (slot, id, data) => { res[slot] = { id, data }; return data; };
 export function dispose() {
   for (const t of timers) clearInterval(t);
   timers = [];
+  setBusy(false);
 }
 
-function poll(fn, ms = 1200) {
+// Every long-running thing on this page is polled, so "a poller is alive" is
+// the same statement as "a task is running" - one place to lock the page from.
+function poll(fn, ms = 1200, label = 'กำลังทำงาน') {
   const t = setInterval(fn, ms);
   timers.push(t);
+  setBusy(true, label);
   fn();
   return t;
 }
@@ -44,6 +48,7 @@ function poll(fn, ms = 1200) {
 function stopPoll(t) {
   clearInterval(t);
   timers = timers.filter((x) => x !== t);
+  if (!timers.length) setBusy(false);
 }
 
 /* ------------------------------------------------------------------ shell */
@@ -105,6 +110,9 @@ export async function render(host, params) {
       confirmText: 'เริ่มใหม่',
     });
     if (!ok) return;
+    // Resetting while a task runs would drop the lock and leave the runner
+    // working on a table the page has stopped tracking.
+    if (isBusy()) { toast(`${isBusy()} — รอให้เสร็จ หรือกดยกเลิกก่อน`, 'warn'); return; }
     resetTable(key);
     render(host, { key });
   });
@@ -265,6 +273,12 @@ function watchTask(host, kind, id) {
   const btn0 = $(`#${prefix}-cancel`, host);
   if (btn0) btn0.disabled = false;
 
+  const cancelTask = () => {
+    const cancel = kind === 'preflight' ? api.preflightCancel : api.checksumCancel;
+    cancel(id).catch(() => { /* already gone */ });
+    toast('สั่งยกเลิกแล้ว เดี๋ยวจะหยุดให้', 'info');
+  };
+
   const t = poll(async () => {
     let task;
     try { task = await get(id, false); } catch { return; }
@@ -275,6 +289,12 @@ function watchTask(host, kind, id) {
     if (cancelBtn) cancelBtn.disabled = task.status !== 'running';
     const p = task.progress || { done: 0, total: 0 };
     const elapsed = Date.now() - new Date(task.createdAt).getTime();
+    if (task.status === 'running') {
+      setBusy(true, kind === 'preflight' ? 'กำลังตรวจข้อมูล' : 'กำลังเก็บ baseline', {
+        detail: `${p.total ? `${num(p.done)}/${num(p.total)} · ` : ''}ผ่านไป ${duration(elapsed)}`,
+        onCancel: cancelTask,
+      });
+    }
     if (progressBox) {
       progressBox.innerHTML = `
         <div class="progress-wrap">
@@ -298,7 +318,7 @@ function watchTask(host, kind, id) {
     if (task.status === 'cancelled') { toast('ยกเลิกแล้ว', 'warn'); return; }
     if (kind === 'preflight') await loadPreflight(host, id, true);
     else await loadChecksum(host, id, true);
-  });
+  }, 1200, kind === 'preflight' ? 'กำลังตรวจข้อมูล' : 'กำลังเก็บ baseline');
 }
 
 async function loadPreflight(host, id, announce = false) {
@@ -724,6 +744,17 @@ function watchJob(host, id, dryRun = false) {
     let job;
     try { job = await api.job(id); } catch { return; }
     renderJob(host, job, dryRun);
+    // A paused job is executing nothing, so the page need not be held - and
+    // holding it would trap the operator on a page that is waiting for them.
+    const p = job.progress || {};
+    setBusy(job.status === 'running' || job.status === 'rolling_back', runLabel(dryRun), {
+      detail: `ขั้น ${num(p.doneSteps)}/${num(p.totalSteps)} · ${esc(pct(p.pct))}`,
+      cancelText: 'หยุดงาน',
+      onCancel: () => {
+        api.jobCancel(job.id).catch(() => { /* already finishing */ });
+        toast('สั่งหยุดแล้ว ขั้นที่กำลังรันจะทำต่อจนจบก่อน', 'warn', 9000);
+      },
+    });
     if (['done', 'failed', 'cancelled', 'rolled_back'].includes(job.status)) {
       stopPoll(t);
       if (!dryRun) setTableState(key, { jobStatus: job.status });
@@ -732,8 +763,10 @@ function watchJob(host, id, dryRun = false) {
         : `งานจบแบบ ${job.status}`, job.status === 'done' ? 'ok' : 'err');
       if (!dryRun) redraw();
     }
-  });
+  }, 1200, runLabel(dryRun));
 }
+
+const runLabel = (dryRun) => (dryRun ? 'กำลังลองรัน' : 'กำลังแปลงตาราง');
 
 async function loadJob(host, id) {
   try {
@@ -771,15 +804,40 @@ function renderJob(host, job, dryRun = false) {
   if (cancel) cancel.addEventListener('click', async () => { await api.jobCancel(job.id); toast('สั่งหยุดแล้ว', 'info'); });
 }
 
+/**
+ * The step-5 baseline is whatever was fingerprinted at step 2, which can be
+ * minutes older than the ALTER. The pair that actually brackets the ALTER is
+ * the one the runner took itself, so when the baseline only drifted, say what
+ * that pair found.
+ */
+function jobVerdictLine() {
+  const j = res.job && res.job.data;
+  const st = tableState(key);
+  if (!j || j.id !== st.jobId) return '';
+  const s = (j.steps || []).find((x) => `${x.schemaName}.${x.tableName}` === key);
+  if (!s || !s.verify) return '';
+  const b = s.checksumBefore || {};
+  const a = s.checksumAfter || {};
+  const counts = b.rowCount !== undefined && a.rowCount !== undefined
+    ? ` (${num(b.rowCount)} → ${num(a.rowCount)})` : '';
+  return `<br>คู่ที่คร่อม ALTER จริงคือของตัวรันเอง ตอนนั้น${s.verify.ok
+    ? `<strong>ตรงกัน</strong>${counts}` : `<strong>ไม่ตรงกัน</strong>${counts}`}`;
+}
+
 /* ---------------------------------------------------------------- 5 verify */
 
 function stepVerify(st, at) {
   const locked = at < 5;
-  const status = st.verifyOk === true ? 'done' : st.verifyOk === false ? 'problem' : (locked ? '' : 'ready');
+  const appended = Number(st.verifyAppended) || 0;
+  const status = st.verifyOk === true ? 'done'
+    : appended ? 'warn'
+      : st.verifyOk === false ? 'problem' : (locked ? '' : 'ready');
   return step({
     n: 5,
     title: 'เช็คว่าข้อมูลยังเหมือนเดิม',
-    sub: st.verifyOk === true ? 'ตรงกับ baseline' : st.verifyOk === false ? 'ไม่ตรงกับ baseline' : 'เอาค่าตอนนี้ไปเทียบกับ baseline',
+    sub: st.verifyOk === true ? 'ตรงกับ baseline'
+      : appended ? `มีแถวเพิ่ม ${num(appended)} แถวหลังเก็บ baseline`
+        : st.verifyOk === false ? 'ไม่ตรงกับ baseline' : 'เอาค่าตอนนี้ไปเทียบกับ baseline',
     status,
     locked,
     lockReason: 'รันจริงที่ขั้น 4 ให้ผ่านก่อน',
@@ -812,6 +870,12 @@ function wireVerify(host) {
         if (box) box.innerHTML = '';
         btn.disabled = false;
         loadVerify(host, task.id, true);
+      }, 1200, 'กำลังเทียบกับ baseline');
+      setBusy(true, 'กำลังเทียบกับ baseline', {
+        onCancel: () => {
+          api.checksumCancel(task.id).catch(() => { /* already gone */ });
+          toast('สั่งยกเลิกแล้ว', 'info');
+        },
       });
     } catch (err) {
       toast(err.message, 'err', 9000);
@@ -841,13 +905,27 @@ async function loadVerify(host, id, announce = false) {
   // Normalise before comparing: the stored value is always a boolean, so an
   // undefined here would never match and the redraw below would never settle.
   const ok = !!cmp.ok;
-  if (tableState(key).verifyOk !== ok) { setTableState(key, { verifyOk: ok }); redraw(); return; }
+  const appended = Number(cmp.appended) || 0;
+  const stNow = tableState(key);
+  if (stNow.verifyOk !== ok || (Number(stNow.verifyAppended) || 0) !== appended) {
+    setTableState(key, { verifyOk: ok, verifyAppended: appended });
+    redraw();
+    return;
+  }
   if (!box) return;
   box.innerHTML = ok
     ? note('ok', 'ข้อมูลยังเหมือนเดิม', cmp.caveat
       ? `ค่าและจำนวนแถวเท่าเดิม <strong>แต่ดูแค่บางส่วน:</strong> ${esc(cmp.caveat)}`
       : 'ค่าและจำนวนแถวเท่าเดิมทุกตัว การแปลงไม่ได้ทำให้ตัวอักษรไหนเปลี่ยน')
-    : note('crit', 'ข้อมูลไม่ตรงกับ baseline', `<ul>${cmp.issues.map((i) => `<li>${esc(i)}</li>`).join('')}</ul>
+    : appended
+      ? note('warn', `มีแถวเพิ่มมา ${num(appended)} แถวหลังเก็บ baseline`, `
+        ตารางนี้ยังรับ write อยู่ระหว่างที่ทำงาน การเทียบแบบนับแถวจึงบอกได้แค่ว่าจำนวนแถวขยับ
+        ไม่ได้บอกว่าข้อมูลเดิมเปลี่ยน${jobVerdictLine()}`)
+      : note('crit', 'ข้อมูลไม่ตรงกับ baseline', `<ul>${cmp.issues.map((i) => `<li>${esc(i)}</li>`).join('')}</ul>
         ถ้าจะย้อนกลับ ไปที่หน้า “งานที่รันไปแล้ว”`);
-  if (announce) toast(ok ? 'เรียบร้อย ข้อมูลยังเหมือนเดิม' : 'ข้อมูลไม่ตรงกับ baseline', ok ? 'ok' : 'err', 9000);
+  if (announce) {
+    toast(ok ? 'เรียบร้อย ข้อมูลยังเหมือนเดิม'
+      : appended ? `มีแถวเพิ่มมา ${num(appended)} แถวหลัง baseline`
+        : 'ข้อมูลไม่ตรงกับ baseline', ok ? 'ok' : appended ? 'warn' : 'err', 9000);
+  }
 }

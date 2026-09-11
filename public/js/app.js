@@ -1,5 +1,5 @@
 import { api, state, setSession } from './api.js';
-import { $, $$, esc, toast } from './util.js';
+import { $, $$, esc, toast, isBusy, setBusy } from './util.js';
 
 import * as connectView from './views/connect.js';
 import * as overviewView from './views/overview.js';
@@ -22,6 +22,9 @@ const ROUTES = {
 };
 
 let current = null;
+// What the address bar said when the current view was mounted, so a back-button
+// press that the busy lock refuses can be put back.
+let lastHash = '';
 
 /** '#table/shop.orders' -> { route: 'table', params: { key: 'shop.orders' } } */
 function parseHash() {
@@ -33,6 +36,13 @@ function parseHash() {
 
 export function navigate(route, params) {
   if (!ROUTES[route]) route = 'connect';
+  // A running task owns the page it started from until it ends or is cancelled.
+  const busy = isBusy();
+  if (busy && current && ROUTES[route] !== current) {
+    toast(`${busy} — รอให้เสร็จ หรือกดยกเลิกก่อนออกจากหน้านี้`, 'warn');
+    if (location.hash !== lastHash) location.hash = lastHash;
+    return;
+  }
   if (!ROUTES[route].open && !state.session) {
     toast('ต่อฐานข้อมูลก่อนนะ', 'warn');
     route = 'connect';
@@ -45,6 +55,7 @@ export function navigate(route, params) {
   location.hash = route === 'table' && params && params.key
     ? `#table/${encodeURIComponent(params.key)}`
     : `#${route}`;
+  lastHash = location.hash;
   $('#page-title').textContent = def.title;
   $('#topbar-actions').innerHTML = '';
   const navRoute = route === 'table' ? 'tables' : route;
@@ -120,9 +131,17 @@ async function boot() {
     el.addEventListener('click', () => navigate(el.dataset.route));
   }
   window.addEventListener('csmig:session-lost', () => {
+    setBusy(false);
     refreshChrome();
     toast('session หมดอายุแล้ว ต่อใหม่อีกครั้ง', 'warn');
     navigate('connect');
+  });
+  // Reload / close while a task runs: only the browser's own confirm can stop
+  // those, and it needs both of these to fire.
+  window.addEventListener('beforeunload', (e) => {
+    if (!isBusy()) return;
+    e.preventDefault();
+    e.returnValue = '';
   });
   window.addEventListener('hashchange', () => {
     const { route, params } = parseHash();

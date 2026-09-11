@@ -53,6 +53,38 @@ export function applyDynamicStyles(root = document) {
 
 }
 
+/**
+ * A task is running: say so in the middle of the screen and hold the page there.
+ *
+ * The dialog is modal on purpose - the point is that the operator cannot half
+ * miss it - so whatever cancel path the task has must be handed in as
+ * `opts.onCancel`, or the overlay becomes a wall with no door.
+ *
+ * Callers poll, so this is called repeatedly with the same `on`: everything it
+ * writes is idempotent.
+ */
+let busyLabel = '';
+
+/** '' when idle, otherwise what is running - so callers can name it. */
+export const isBusy = () => busyLabel;
+
+export function setBusy(on, label = 'กำลังทำงาน', opts = {}) {
+  busyLabel = on ? label : '';
+  document.body.classList.toggle('busy', !!on);
+  const el = $('#busy');
+  if (!el) return;
+  el.hidden = !on;
+  if (!on) return;
+  $('#busy-text').textContent = label;
+  $('#busy-sub').textContent = opts.detail || 'อย่าปิดหน้านี้ ระบบกำลังประมวลผล';
+  const btn = $('#busy-cancel');
+  btn.hidden = !opts.onCancel;
+  btn.textContent = opts.cancelText || 'ยกเลิก';
+  // Assigned, not added: a poller calls this every tick and addEventListener
+  // would stack a new handler each time.
+  btn.onclick = opts.onCancel || null;
+}
+
 export function toast(message, kind = 'info', timeout = 5200) {
   const host = $('#toasts');
   const el = document.createElement('div');

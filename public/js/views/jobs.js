@@ -6,7 +6,7 @@ import { work } from '../store.js';
 let lastJobId = (work.current && work.byTable[work.current] && work.byTable[work.current].jobId) || null;
 import {
   $, $$, esc, num, pct, bytes, duration, note, chip, toast, applyDynamicStyles,
-  confirmDialog, localTime, levelKind, collapse,
+  confirmDialog, localTime, levelKind, collapse, setBusy,
 } from '../util.js';
 import { timeline, timelineLegend } from '../charts.js';
 
@@ -22,6 +22,7 @@ export function dispose() {
   clearInterval(timer);
   timer = null;
   ticking = false;
+  setBusy(false);
 }
 
 export async function render(host, params = {}) {
@@ -137,6 +138,18 @@ async function renderDetail(host) {
   applyDynamicStyles(box);
   wireDetail(host, box, job);
 
+  // Same rule as the workspace: hold the page while something is actually
+  // executing, and let go while it is paused or queued.
+  const jp = job.progress || {};
+  setBusy(!job.archived && (job.status === 'running' || job.status === 'rolling_back'),
+    job.status === 'rolling_back' ? 'กำลัง rollback' : 'กำลังแปลงตาราง', {
+      detail: `ขั้น ${num(jp.doneSteps)}/${num(jp.totalSteps)} · ${esc(pct(jp.pct))}`,
+      cancelText: 'หยุดงาน',
+      onCancel: () => {
+        api.jobCancel(job.id).catch(() => { /* already finishing */ });
+        toast('สั่งหยุดแล้ว ขั้นที่กำลังรันจะทำต่อจนจบก่อน', 'warn', 9000);
+      },
+    });
   if (LIVE.has(job.status) && !job.archived) startPoll(host);
   else dispose();
 }
