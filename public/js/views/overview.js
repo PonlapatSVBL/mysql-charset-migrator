@@ -54,24 +54,17 @@ function draw(host, d, pending) {
     <div class="card">
       <div class="cta">
         <div>
-          <h2>${done ? 'ครบแล้ว' : `ยังเหลือ ${num(d.tables.pending)} ตาราง`}</h2>
-          <p class="hint">${done
-    ? `ทุกตารางเป็น <code>${esc(t.charset)} / ${esc(t.collation)}</code> หมดแล้ว`
-    : `${num(d.columns.pending)} คอลัมน์ ยังไม่เป็น <code>${esc(t.charset)} / ${esc(t.collation)}</code>
-       ต้องเขียนข้อมูลใหม่ราวๆ <strong>${bytes(d.tables.pendingBytes)}</strong>`}</p>
+          <h2>${done ? 'ครบแล้ว' : 'Treemap: งานที่เหลือ ตามขนาดตาราง'}</h2>
         </div>
         ${done ? '' : '<button class="btn-primary" id="ov-go">ไปเลือกตาราง</button>'}
       </div>
 
       ${shown.length ? `
       ${treemap(shown, { height: shown.length <= 6 ? 220 : 340 })}
-      <p class="hint">แต่ละช่องคือหนึ่งตาราง ขนาดช่องคือไบต์ที่ ALTER ต้องเขียนใหม่ คลิกเพื่อเข้าไปทำตารางนั้น
-        ${heaviest ? `<br>ตัวใหญ่สุดคือ <code>${esc(heaviest.key)}</code> ที่ ${bytes(heaviest.value)} —
-        ${pct((heaviest.value / (shownBytes || 1)) * 100)} ของงานที่เห็นในภาพนี้อยู่ในตารางเดียว` : ''}
-        <br>${shown.length < d.tables.pending
-    ? `แสดง ${num(shown.length)} ตารางใหญ่ที่สุด จาก ${num(d.tables.pending)} ตารางที่ยังต้องแปลง`
-    : `ครบทั้ง ${num(shown.length)} ตารางที่ยังต้องแปลง`}${cells.some((c) => c.kind === 'meta')
-    ? ' ช่องสีจางคือตารางที่แก้แค่ default ไม่ต้องเขียนข้อมูลใหม่' : ''}</p>` : ''}
+      <p class="hint">${num(shown.length)}/${num(d.tables.pending)} ตาราง ·
+        เขียนใหม่ ${bytes(d.tables.pendingBytes)}${heaviest
+    ? ` · ตัวใหญ่สุด ${pct((heaviest.value / (shownBytes || 1)) * 100)}` : ''}${cells.some((c) => c.kind === 'meta')
+    ? ' · ช่องจาง = แก้แค่ default' : ''}</p>` : ''}
     </div>
 
     <div class="card">
@@ -94,10 +87,9 @@ function draw(host, d, pending) {
           </tbody>
         </table>
       </div>
-      <p class="hint">แท่งใช้สเกลร่วมกันทุกแถว ความยาวจึงเทียบกันได้ตรงๆ ว่า schema ไหนมีตารางเยอะกว่า</p>
     </div>
 
-    ${collapse('ดูสัดส่วนตาม charset กับ collation', `
+    ${collapse('สัดส่วนตาม charset / collation', `
       <div class="grid grid-2">
         <div>
           <h4>ตาม CHARACTER SET</h4>
