@@ -207,6 +207,28 @@ data/
 UI เป็น single-page ES module ไม่มี framework ไม่มี build step (`public/js/app.js` เป็น router แบบ hash-based)
 route `#table/<schema>.<table>` ไม่มีในเมนู — เข้าจาก work list เท่านั้น เพราะต้องมีตารางเป็นบริบท
 
+**ธีม** — ตัวเลือกอยู่ท้าย sidebar มี 10 ธีม (port มาจาก palette ของ DaisyUI) จำไว้ใน `localStorage` คีย์ `csmig.theme` default คือ `emerald`
+
+| | |
+|---|---|
+| cupcake | crème อุ่น ตัวหนังสือม่วงเข้ม accent ฟ้าอมเขียว |
+| emerald (default) | ขาว/เทาเย็น accent เขียวมิ้นต์ |
+| corporate | ขาว accent น้ำเงิน |
+| retro | พื้นคากี accent ส้มอมชมพู |
+| valentine | พื้นชมพู accent แดงกุหลาบ |
+| lofi | ขาว/เทาล้วน accent เกือบดำ |
+| pastel | ขาว accent ม่วงอ่อน |
+| autumn | เทาอุ่น accent เลือดหมู |
+| lemonade | ขาวอมเหลือง accent เขียวใบไม้ |
+| winter | ขาวอมฟ้า accent น้ำเงินสด |
+
+ธีมคือ **13 ตัวเลข** ใน `:root[data-theme="..."]` (neutral hue/chroma, ความสว่างของ plane กับ canvas, 3 ระดับของหมึก, primary/hover/label)
+พื้นผิว เส้น แทร็ก และ wash ทั้งหมด derive จาก 13 ตัวนี้ด้วย `calc()` — เพิ่มธีมใหม่คือเพิ่มบล็อกเดียว ไม่ต้องแตะที่อื่น
+ทุกธีมถูกเช็ก contrast ตอนสร้าง: label บนปุ่ม, ลิงก์บนพื้น และหมึกจางสุดบนพื้นจางสุด ผ่าน 4.5:1 ทั้งหมด
+
+**สิ่งที่ไม่เปลี่ยนตามธีม** — ramp ของสถานะ (`--ok` / `--warn` / `--crit` / `--info`) และสีของ slice ในกราฟ
+จุดประสงค์ทั้งหมดของสีสถานะคือมันต้องแปลว่าเรื่องเดียวกันทุกจอ ข้อยกเว้นเดียวคือธีมที่แบรนด์เป็นสีเขียวเอง (`lemonade`) ซึ่งเลื่อน `--ok` หลบให้
+
 ### 1. เชื่อมต่อ (`#connect`)
 
 ฟอร์ม host / port / user / password / database / SSL → `POST /api/connect`
@@ -408,13 +430,22 @@ PK ที่เป็น text จะถูก **จัดลำดับให�
 
 **2 strategies**
 
-- **`convert_table`** (default, แนะนำ) — `CONVERT TO CHARACTER SET` ปล่อยให้ MySQL จัดการนิยามคอลัมน์เอง ปลอดภัยกว่าเพราะไม่ต้องประกอบ DDL ใหม่
-- **`modify_columns`** — ประกอบนิยามคอลัมน์ขึ้นใหม่จาก `information_schema` (`columnDefinition()` รวม `COLUMN_TYPE`, charset/collate, `GENERATED ALWAYS AS`, NULL/NOT NULL, `DEFAULT` (จัดการทั้งแบบ MySQL 8 `DEFAULT_GENERATED` expression และรูปแบบ pre-quoted ของ MariaDB), `AUTO_INCREMENT`, `ON UPDATE CURRENT_TIMESTAMP`, `INVISIBLE`, `COMMENT`) ใช้เมื่อต้องการคงคอลัมน์ที่ตั้ง charset เฉพาะเอาไว้ — **ต้องอ่าน DDL ที่สร้างออกมาให้ครบก่อนรัน** (ดู "ข้อจำกัดที่ทราบ")
+- **`convert_table`** — `CONVERT TO CHARACTER SET` ปล่อยให้ MySQL จัดการนิยามคอลัมน์เอง ไม่ต้องประกอบ DDL ใหม่ แต่แปลง **ทุก** คอลัมน์ข้อความในตารางเสมอ เลือกเฉพาะบางคอลัมน์ไม่ได้
+- **`modify_columns`** (default, แนะนำ) — ประกอบนิยามคอลัมน์ขึ้นใหม่จาก `information_schema` (`columnDefinition()` รวม `COLUMN_TYPE`, charset/collate, `GENERATED ALWAYS AS`, NULL/NOT NULL, `DEFAULT` (จัดการทั้งแบบ MySQL 8 `DEFAULT_GENERATED` expression และรูปแบบ pre-quoted ของ MariaDB), `AUTO_INCREMENT`, `ON UPDATE CURRENT_TIMESTAMP`, `INVISIBLE`, `COMMENT`) ใช้เมื่อต้องการคงคอลัมน์ที่ตั้ง charset เฉพาะเอาไว้ — **ต้องอ่าน DDL ที่สร้างออกมาให้ครบก่อนรัน** (ดู "ข้อจำกัดที่ทราบ")
+
+**เลือกคอลัมน์เอง (`options.columns`)**
+
+เฉพาะกับ `modify_columns` เท่านั้น ส่ง `columns: ["order_id", "emp_id"]` เพื่อจำกัดว่าจะแตะคอลัมน์ไหน
+ไม่ส่งฟิลด์นี้ = แปลงทุกคอลัมน์ที่ยังไม่ตรง target ส่ง array ว่าง = ไม่แตะคอลัมน์ใดเลย (เหลือแค่ default ของตาราง)
+ถ้ามีคอลัมน์ที่ยังไม่ตรง target แต่ไม่ถูกเลือก แผนจะติด risk `partial_columns` (warn) เพราะตารางจะมี charset ปนกัน
+
+หน้า UI ขั้น 3 จะติ๊กคอลัมน์ที่ลงท้ายด้วย `_id` ให้เป็น default — คอลัมน์ที่ JOIN พังก่อนเพื่อนเมื่อ collation สองฝั่งไม่ตรงกัน
 
 **Risk codes ทั้งหมดที่ `tableRisks()` ออก**
 
 | code | level | เงื่อนไข |
 |---|---|---|
+| `partial_columns` | warn | เลือกแปลงบางคอลัมน์ (`options.columns`) ทั้งที่ยังมีคอลัมน์อื่นไม่ตรง target |
 | `lossy_narrowing` | critical | มีคอลัมน์ที่ charset ต้นทางกว้าง (bytes/char มากกว่า) กว่าเป้าหมาย |
 | `unique_collation` | warn | มีคอลัมน์ `UNI` หรือ UNIQUE index ครอบคอลัมน์ที่จะเปลี่ยน collation |
 | `partitioned` | warn | ตารางมี partition (ALTER จะ rebuild ทุก partition) |
@@ -710,8 +741,9 @@ mysql-charset-migrator/
 │
 ├── public/
 │   ├── index.html             SPA shell: sidebar 6 เมนู, topbar, container ของ view (โหลด app.js เป็น ES module)
-│   ├── css/app.css            สไตล์ทั้งหมด (ไม่มี framework ไม่มี build step)
+│   ├── css/app.css            สไตล์ทั้งหมด (ไม่มี framework ไม่มี build step) + 10 ธีมเป็น `:root[data-theme]`
 │   └── js/
+│       ├── theme.js           classic script ใน `<head>` ใส่ธีมที่จำไว้ลง `<html>` ก่อน paint แรก + ผูก select
 │       ├── app.js             hash router (รองรับ `#table/<schema>.<table>`), refreshChrome(), boot sequence
 │       ├── api.js             transport: แนบ X-App-Key/X-Session-Id, จัดการ 401 session-lost, blob download
 │       ├── store.js           ความคืบหน้า 5 ขั้น **ต่อตาราง** (persist ลง sessionStorage) + tableBody() ที่ส่งได้ทีละตารางเท่านั้น

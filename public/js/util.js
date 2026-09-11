@@ -161,7 +161,7 @@ export function showModal(title, bodyHtml) {
 /** Categorical series colours for charset / collation breakdowns. Tuned for the
  *  light surface: mid-dark and saturated, so a legend dot and a 4px bar both
  *  stay legible on white. Ordered for maximum separation between neighbours. */
-const PALETTE = ['#0f766e', '#1d4ed8', '#b45309', '#be123c', '#15803d', '#0e7490', '#475569', '#c2410c', '#4d7c0f', '#9d174d'];
+const PALETTE = ['#047857', '#1d4ed8', '#b45309', '#be123c', '#0e7490', '#4d7c0f', '#475569', '#c2410c', '#9d174d', '#0f766e'];
 export const paletteColor = (i) => PALETTE[i % PALETTE.length];
 
 export function bar(percent, kind = '') {

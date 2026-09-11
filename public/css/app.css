@@ -5,38 +5,62 @@
    through the CSSOM (see util.js applyDynamicStyles).
 
    Light console. Design thesis: the console's colour IS the migration's status.
-   Teal is the only interactive colour; green / amber / red are reserved for
-   what the database is actually telling you. Monospace carries data and chrome,
-   the humanist sans carries language.
+   The theme owns exactly one interactive colour - buttons, links, active nav,
+   chart fills - and the status ramp (green / amber / red) owns everything the
+   database is actually telling you. Those two languages never trade places,
+   which is why switching theme repaints the chrome and leaves "this column
+   will lose characters" looking the same on all ten. Monospace carries data
+   and chrome, the humanist sans carries language.
 
-   Surface planes: white is the working plane (sidebar, topbar, cards, tables),
-   a cool light grey is the canvas behind it.
+   Surface planes: the lighter plane is the working surface (sidebar, topbar,
+   cards, tables), the darker one is the canvas behind it. Which two shades
+   those are is the theme's business - see the seeds below.
    ========================================================================= */
 
 :root {
-  /* ---- shadcn token layer ------------------------------------------------
+  /* ---- theme seeds ------------------------------------------------------
+     A theme is these thirteen numbers and nothing else. Every surface, line,
+     ink and wash below is DERIVED from them, so a new theme is one
+     `:root[data-theme=...]` block at the foot of this section and no other
+     edit anywhere. The ten themes are ports of DaisyUI's palettes onto this
+     token layer, contrast-checked on the way in: every label holds 4.5:1 on
+     its own fill, and the dimmest ink holds 4.5:1 on the dimmest surface it
+     ever sits on. Default is emerald, which is what :root carries.
+ */
+  --h: 247.8;          /* neutral hue */
+  --c: 0.003;          /* how far the greys lean into that hue */
+  --l-1: 1;            /* the working plane: cards, sidebar, topbar */
+  --l-2: 0.976;        /* the canvas behind it - the rest of the ramp walks
+                          down from here, so one number moves every line,
+                          fill and track together */
+  --ink-l:  0.355;     /* body text */
+  --ink-l2: 0.536;     /* labels, secondary text */
+  --ink-l3: 0.537;     /* hints, table heads - the dimmest ink that still reads */
+  --ink-c:  0.032; --ink-h: 263;
+  --primary:            oklch(0.767 0.135 153.5);
+  --primary-hover:      oklch(0.547 0.135 153.5); /* also the link / active-nav ink */
+  --primary-foreground: oklch(0.25 0.032 263);    /* the label on a primary fill */
+
+  /* ---- shadcn token layer, derived --------------------------------------
      The names and roles are shadcn/ui's - background / card / muted / border /
      input / ring / primary / destructive - so any component here can be read
      straight off the shadcn recipe. The values are ours.
  */
-  --background:       oklch(1 0 0);         /* the working plane: cards, chrome */
-  --card:             oklch(1 0 0);
-  --canvas:           oklch(0.976 0.002 215); /* the field behind the plane */
-  --muted:            oklch(0.967 0.003 215); /* controls, tabs track, table head */
-  --muted-2:          oklch(0.930 0.004 215); /* hover */
-  --input:            oklch(0.985 0.002 215); /* form fields, before focus */
-  --border:           oklch(0.900 0.004 215);
-  --border-soft:      oklch(0.936 0.003 215);
-  --ring:             oklch(0.520 0.105 205);
+  --background:       oklch(var(--l-1) var(--c) var(--h));  /* the working plane */
+  --card:             var(--background);
+  --canvas:           oklch(var(--l-2) var(--c) var(--h));  /* the field behind it */
+  --muted:            oklch(calc(var(--l-2) - 0.009) var(--c) var(--h)); /* controls, tabs track, table head */
+  --muted-2:          oklch(calc(var(--l-2) - 0.046) var(--c) var(--h)); /* hover */
+  --input:            oklch(calc((var(--l-1) + var(--l-2)) / 2) var(--c) var(--h));
+  --border:           oklch(calc(var(--l-2) - 0.076) var(--c) var(--h));
+  --border-soft:      oklch(calc(var(--l-2) - 0.040) var(--c) var(--h));
+  --ring:             var(--primary);
 
-  --foreground:       oklch(0.216 0.006 215); /* 16.4:1 on white */
-  --foreground-2:     oklch(0.432 0.008 215); /*  8.1:1 on white */
-  --muted-foreground: oklch(0.508 0.008 215); /*  5.9:1 on white, 5.1:1 on --muted */
+  --foreground:       oklch(var(--ink-l)  var(--ink-c) var(--ink-h));
+  --foreground-2:     oklch(var(--ink-l2) calc(var(--ink-c) * 0.7)  var(--ink-h));
+  --muted-foreground: oklch(var(--ink-l3) calc(var(--ink-c) * 0.55) var(--ink-h));
 
-  --primary:          oklch(0.505 0.100 205); /*  5.5:1 on white, carries white text */
-  --primary-hover:    oklch(0.420 0.090 205);
-  --primary-subtle:   oklch(0.940 0.030 200); /* active nav wash, selection */
-  --primary-foreground: oklch(0.995 0 0);
+  --primary-subtle:   color-mix(in oklab, var(--primary) 14%, var(--background)); /* active nav wash, selection */
 
   /* shadcn radius scale: rounded-lg is --radius, md is -2px, sm is -4px */
   --radius:     8px;
@@ -47,8 +71,8 @@
   --bg-3:       var(--muted);
   --bg-4:       var(--muted-2);
   --bg-input:   var(--input);
-  --bg-code:    oklch(0.972 0.003 215);
-  --track:      oklch(0.918 0.004 215);   /* bar and progress tracks */
+  --bg-code:    oklch(calc(var(--l-2) - 0.004) var(--c) var(--h));
+  --track:      oklch(calc(var(--l-2) - 0.058) var(--c) var(--h));   /* bar and progress tracks */
   --line:       var(--border);
   --line-soft:  var(--border-soft);
 
@@ -66,17 +90,20 @@
 
   /* ---- status: reserved for what the database reports --------------------
      Two ramps: the saturated one marks (dots, bars, rules, chart segments),
-     the dark one speaks (text on a tinted field). */
-  --ok:   oklch(0.640 0.150 155);
+     the dark one speaks (text on a tinted field). These do NOT move with the
+     theme - the point of the status ramp is that it means the same thing on
+     every screen. The one exception is a theme whose brand colour is itself
+     green; that one moves --ok out of its own way. */
+  --ok:   oklch(0.645 0.165 142);
   --warn: oklch(0.760 0.155 72);
   --crit: oklch(0.585 0.215 25);
   --info: oklch(0.600 0.130 245);
 
   /* The mark ramp is tuned for fills that carry no text. --ok-solid is the one
      green dark enough to sit under white glyphs at small sizes (white on --ok
-     is 3.09:1; the done badge is a state readout and has to be legible). */
-  --ok-solid: oklch(0.505 0.135 155);
-  --ok-t:   oklch(0.430 0.110 155);
+     is 3.10:1; the done badge is a state readout and has to be legible). */
+  --ok-solid: oklch(0.520 0.150 142);
+  --ok-t:   oklch(0.440 0.125 142);
   --warn-t: oklch(0.440 0.100 62);
   --crit-t: oklch(0.455 0.165 25);
   --info-t: oklch(0.440 0.120 245);
@@ -111,8 +138,9 @@
 
   /* shadcn's two elevations and nothing in between: shadow-sm to lift a
      surface off the canvas, shadow-lg for the things that float over it. */
-  --sh-1: 0 1px 2px 0 oklch(0.216 0.006 215 / .05);
-  --sh-2: 0 10px 15px -3px oklch(0.216 0.006 215 / .10), 0 4px 6px -4px oklch(0.216 0.006 215 / .10);
+  --shadow-ink: var(--ink-l) var(--ink-c) var(--ink-h);
+  --sh-1: 0 1px 2px 0 oklch(var(--shadow-ink) / .05);
+  --sh-2: 0 10px 15px -3px oklch(var(--shadow-ink) / .10), 0 4px 6px -4px oklch(var(--shadow-ink) / .10);
 
   /* ---- semantic stacking ------------------------------------------------- */
   --z-sticky: 10;
@@ -124,6 +152,101 @@
   /* ---- motion ------------------------------------------------------------ */
   --e-out: cubic-bezier(.16, 1, .3, 1);
   --e-quart: cubic-bezier(.25, 1, .5, 1);
+}
+
+/* ---- the ten themes ---------------------------------------------------- */
+:root[data-theme="cupcake"] {
+  --h: 56.4; --c: 0.008;
+  --l-1: 0.978; --l-2: 0.94;
+  --ink-l: 0.236; --ink-l2: 0.444; --ink-l3: 0.514;
+  --ink-c: 0.066; --ink-h: 313.2;
+  --primary:            oklch(0.762 0.089 200);
+  --primary-hover:      oklch(0.537 0.089 200);
+  --primary-foreground: oklch(0.236 0.066 313.2);
+}
+:root[data-theme="emerald"] {
+  --h: 247.8; --c: 0.003;
+  --l-1: 1; --l-2: 0.976;
+  --ink-l: 0.355; --ink-l2: 0.536; --ink-l3: 0.537;
+  --ink-c: 0.032; --ink-h: 263;
+  --primary:            oklch(0.767 0.135 153.5);
+  --primary-hover:      oklch(0.547 0.135 153.5);
+  --primary-foreground: oklch(0.25 0.032 263);
+}
+:root[data-theme="corporate"] {
+  --h: 247.9; --c: 0.003;
+  --l-1: 1; --l-2: 0.972;
+  --ink-l: 0.224; --ink-l2: 0.441; --ink-l3: 0.515;
+  --ink-c: 0.031; --ink-h: 278.1;
+  --primary:            oklch(0.578 0.217 269.1);
+  --primary-hover:      oklch(0.488 0.217 269.1);
+  --primary-foreground: oklch(0.995 0 0);
+}
+:root[data-theme="retro"] {
+  --h: 90.5; --c: 0.049;
+  --l-1: 0.916; --l-2: 0.883;
+  --ink-l: 0.265; --ink-l2: 0.447; --ink-l3: 0.469;
+  --ink-c: 0.006; --ink-h: 0.5;
+  --primary:            oklch(0.769 0.104 22.7);
+  --primary-hover:      oklch(0.514 0.104 22.7);
+  --primary-foreground: oklch(0.25 0.006 0.5);
+}
+:root[data-theme="valentine"] {
+  --h: 337; --c: 0.049;
+  --l-1: 0.903; --l-2: 0.862;
+  --ink-l: 0.373; --ink-l2: 0.457; --ink-l3: 0.457;
+  --ink-c: 0.081; --ink-h: 4.6;
+  --primary:            oklch(0.686 0.154 15.1);
+  --primary-hover:      oklch(0.506 0.154 15.1);
+  --primary-foreground: oklch(0.25 0.081 4.6);
+}
+:root[data-theme="lofi"] {
+  --h: 89.9; --c: 0.003;
+  --l-1: 1; --l-2: 0.949;
+  --ink-l: 0.145; --ink-l2: 0.384; --ink-l3: 0.465;
+  --ink-c: 0; --ink-h: 89.9;
+  --primary:            oklch(0.159 0 89.9);
+  --primary-hover:      oklch(0.259 0 89.9);
+  --primary-foreground: oklch(0.995 0 0);
+}
+:root[data-theme="pastel"] {
+  --h: 247.8; --c: 0.003;
+  --l-1: 1; --l-2: 0.976;
+  --ink-l: 0.278; --ink-l2: 0.48; --ink-l3: 0.539;
+  --ink-c: 0.03; --ink-h: 256.8;
+  --primary:            oklch(0.831 0.035 316.9);
+  --primary-hover:      oklch(0.566 0.035 316.9);
+  --primary-foreground: oklch(0.25 0.03 256.8);
+}
+:root[data-theme="autumn"] {
+  --h: 89.9; --c: 0.003;
+  --l-1: 0.958; --l-2: 0.907;
+  --ink-l: 0.239; --ink-l2: 0.441; --ink-l3: 0.489;
+  --ink-c: 0; --ink-h: 89.9;
+  --primary:            oklch(0.407 0.161 17.5);
+  --primary-hover:      oklch(0.317 0.161 17.5);
+  --primary-foreground: oklch(0.995 0 0);
+}
+:root[data-theme="lemonade"] {
+  --h: 112.9; --c: 0.02;
+  --l-1: 1; --l-2: 0.976;
+  --ink-l: 0.214; --ink-l2: 0.434; --ink-l3: 0.508;
+  --ink-c: 0.024; --ink-h: 108.2;
+  --primary:            oklch(0.611 0.176 134.6);
+  --primary-hover:      oklch(0.521 0.176 134.6);
+  --primary-foreground: oklch(0.214 0.024 108.2);
+  --ok:   oklch(0.660 0.140 168);
+  --ok-solid: oklch(0.530 0.120 168);
+  --ok-t: oklch(0.450 0.100 168);
+}
+:root[data-theme="winter"] {
+  --h: 259.8; --c: 0.012;
+  --l-1: 1; --l-2: 0.975;
+  --ink-l: 0.419; --ink-l2: 0.537; --ink-l3: 0.537;
+  --ink-c: 0.054; --ink-h: 255.8;
+  --primary:            oklch(0.568 0.217 257.6);
+  --primary-hover:      oklch(0.478 0.217 257.6);
+  --primary-foreground: oklch(0.995 0 0);
 }
 
 * { box-sizing: border-box; }
@@ -249,6 +372,15 @@ h1, h2, h3, h4 { text-wrap: balance; }
 .conn-card dd { margin: 0; font-family: var(--mono); font-size: var(--t-mini); color: var(--fg-dim); overflow-wrap: anywhere; }
 .conn-card .chip { align-self: flex-start; }
 
+/* Theme switch. Sits under the connection card, where a preference belongs:
+   near the bottom, reachable, and never in the path of the work. */
+.theme-pick { display: flex; align-items: center; gap: var(--s2); padding: 0 var(--s1); }
+.theme-pick > span { font-size: var(--t-mini); color: var(--fg-mute); flex: none; }
+.theme-pick select {
+  flex: 1; min-width: 0; padding: 4px var(--s2);
+  font-family: var(--mono); font-size: var(--t-mini);
+}
+
 .sidebar-foot { display: flex; gap: var(--s1) 6px; flex-wrap: wrap; padding: 0 var(--s1); }
 
 .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
@@ -328,6 +460,19 @@ label.check {
 }
 label.check:hover { color: var(--fg); }
 label.check input { width: auto; accent-color: var(--accent); }
+
+/* The column tick list in the plan step. A wide table has dozens of text
+   columns, so it wraps into as many lanes as fit and scrolls past ~8 rows
+   rather than pushing the build button off the screen. */
+.collist {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 2px var(--s3);
+  max-height: 232px; overflow-y: auto;
+  border: 1px solid var(--line-soft); border-radius: var(--r-md);
+  padding: var(--s2) var(--s3);
+}
+.collist label.check { padding: 2px 0; }
+.collist .mono { font-size: var(--t-mini); }
 .hint { color: var(--fg-mute); font-size: var(--t-small); }
 .hint.mono { font-size: var(--t-mini); }
 
@@ -502,17 +647,18 @@ label.check input { width: auto; accent-color: var(--accent); }
 
 /* Categorical slice colours. Mid-dark and saturated so a 9px legend key and a
    thin donut band both hold on white, ordered for separation between
-   neighbours. */
-.sl-0 { fill: #6d28d9; background: #6d28d9; }
-.sl-1 { fill: #0f766e; background: #0f766e; }
+   neighbours. Same list, same order, as PALETTE in util.js - one chart may be
+   drawn from either. */
+.sl-0 { fill: #047857; background: #047857; }
+.sl-1 { fill: #1d4ed8; background: #1d4ed8; }
 .sl-2 { fill: #b45309; background: #b45309; }
 .sl-3 { fill: #be123c; background: #be123c; }
-.sl-4 { fill: #1d4ed8; background: #1d4ed8; }
-.sl-5 { fill: #15803d; background: #15803d; }
-.sl-6 { fill: #a21caf; background: #a21caf; }
-.sl-7 { fill: #475569; background: #475569; }
-.sl-8 { fill: #c2410c; background: #c2410c; }
-.sl-9 { fill: #4d7c0f; background: #4d7c0f; }
+.sl-4 { fill: #0e7490; background: #0e7490; }
+.sl-5 { fill: #4d7c0f; background: #4d7c0f; }
+.sl-6 { fill: #475569; background: #475569; }
+.sl-7 { fill: #c2410c; background: #c2410c; }
+.sl-8 { fill: #9d174d; background: #9d174d; }
+.sl-9 { fill: #0f766e; background: #0f766e; }
 
 /* ----------------------------------------------------------------- tables */
 .table-wrap {
@@ -589,7 +735,7 @@ tbody td .hint, .legend .hint, .stat .hint { font-size: var(--t-micro); }
 .note-info > strong:first-child { color: var(--accent-hi); }
 .note ul { margin: 6px 0 0; padding-left: 18px; }
 .note li + li { margin-top: 3px; }
-.note code { background: oklch(0.30 0.03 215 / .08); padding: 0 4px; border-radius: 3px; color: inherit; }
+.note code { background: oklch(min(var(--ink-l), 0.30) calc(var(--ink-c) * 2) var(--ink-h) / .09); padding: 0 4px; border-radius: 3px; color: inherit; }
 
 /* ------------------------------------------------------------------- code */
 pre.sql {
@@ -692,7 +838,7 @@ body.busy #nav, body.busy .conn-card { pointer-events: none; }
 /* ------------------------------------------------------------------ modal */
 .modal-backdrop {
   position: fixed; inset: 0; z-index: var(--z-backdrop);
-  background: oklch(0.26 0.03 215 / .48);
+  background: oklch(min(var(--ink-l), 0.30) calc(var(--ink-c) * 2) var(--ink-h) / .48);
   display: grid; place-items: center; padding: var(--s5);
   animation: fade .18s linear;
 }
@@ -909,6 +1055,7 @@ details.stepcard.warn { border-color: var(--e-warn); }
   .brand { padding: 0; flex: none; }
   .brand-text { display: none; }
   .target-plate, .conn-card, .sidebar-foot { display: none; }
+  .theme-pick { flex: none; }
   #nav { flex-direction: row; gap: var(--s1); flex: none; }
   .nav-item { white-space: nowrap; width: auto; }
   .topbar { padding: var(--s3) var(--s4); flex-wrap: wrap; }
