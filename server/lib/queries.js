@@ -455,7 +455,9 @@ async function tableList(pool, opts) {
       compliant: enriched.filter((r) => r.status === 'compliant').length,
       pendingBytes: enriched.filter((r) => r.needsRebuild).reduce((a, r) => a + r.sizeBytes, 0),
     },
-    rows: filtered.slice((pageNo - 1) * size, pageNo * size),
+    // `all` is for the export, which has to hand over every matching row rather
+    // than the page the operator happens to be looking at.
+    rows: opts.all ? filtered : filtered.slice((pageNo - 1) * size, pageNo * size),
   };
 }
 

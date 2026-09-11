@@ -120,6 +120,38 @@ export const api = {
     toast(`ดาวน์โหลด ${filename}`, 'ok');
   },
 
+  /**
+   * Binary download (the .xlsx export).
+   *
+   * It cannot be a plain <a href>: every /api call has to carry the boot key in
+   * a header, and a link sends none. So the file is fetched, turned into a blob
+   * and clicked locally - which also keeps the key out of the URL bar and out
+   * of the browser's download history.
+   */
+  downloadFile: async (path, query, filename) => {
+    const url = new URL(path, location.origin);
+    for (const [k, v] of Object.entries(query || {})) {
+      if (v === undefined || v === null || v === '') continue;
+      if (Array.isArray(v)) { if (v.length) url.searchParams.set(k, v.join(',')); }
+      else url.searchParams.set(k, String(v));
+    }
+    const headers = { 'X-App-Key': state.bootKey };
+    if (state.sessionId) headers['X-Session-Id'] = state.sessionId;
+    const res = await fetch(url, { headers, credentials: 'omit', cache: 'no-store', mode: 'same-origin' });
+    if (!res.ok) {
+      let message = `HTTP ${res.status}`;
+      try { message = (JSON.parse(await res.text()) || {}).error || message; } catch { /* not json */ }
+      throw new ApiError(message, res.status);
+    }
+    const blob = await res.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  },
+
   tables: (query) => request('GET', '/api/tables', { query }),
   tableDetail: (schemaName, tableName) => request(
     'GET', `/api/tables/${encodeURIComponent(schemaName)}/${encodeURIComponent(tableName)}`

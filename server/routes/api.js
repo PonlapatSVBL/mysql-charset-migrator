@@ -10,6 +10,7 @@ const checksum = require('../lib/checksum');
 const tasks = require('../lib/tasks');
 const limits = require('../lib/limits');
 const jobs = require('../lib/jobs');
+const xlsx = require('../lib/xlsx');
 
 const router = express.Router();
 
@@ -158,6 +159,77 @@ router.get('/tables', requireSession, asyncHandler(async (req, res) => {
     dir: req.query.dir,
   });
   res.json({ ...data, target });
+}));
+
+/**
+ * The work list as a spreadsheet.
+ *
+ * Same filters as the on-screen list, but every matching row rather than the
+ * current page - this is the artefact that gets attached to a change request or
+ * mailed to whoever owns the biggest table, so a 50-row page would be the wrong
+ * thing to hand over. Defaults to status=todo, because "which tables are not
+ * yet on the target collation" is the question being asked.
+ */
+router.get('/export/tables.xlsx', requireSession, asyncHandler(async (req, res) => {
+  const target = resolveTarget(req.query);
+  const status = req.query.status === undefined ? 'todo' : String(req.query.status);
+  const data = await queries.tableList(req.sess.pool, {
+    target,
+    filters: {
+      schema: listParam(req.query.schema),
+      engine: listParam(req.query.engine),
+      q: req.query.q || '',
+      status,
+    },
+    sort: req.query.sort || 'size',
+    dir: req.query.dir || 'desc',
+    all: true,
+  });
+
+  // Nothing in this app is allowed to be unbounded by accident (see
+  // server/lib/limits.js). A workbook is built whole in memory, so a shared
+  // host with a six-figure table count would be an OOM rather than a report -
+  // and a silently truncated compliance audit is worse than a refusal.
+  const MAX_ROWS = 100_000;
+  if (data.rows.length > MAX_ROWS) {
+    return res.status(413).json({
+      error: `มี ${data.rows.length.toLocaleString('en-US')} ตารางที่ตรงกับตัวกรอง เกินเพดาน `
+        + `${MAX_ROWS.toLocaleString('en-US')} แถวต่อไฟล์ — กรอง schema หรือสถานะให้แคบลงแล้วโหลดทีละส่วน`,
+    });
+  }
+
+  const STATUS_TH = {
+    rebuild: 'ต้องเขียนข้อมูลใหม่',
+    metadata_only: 'แก้แค่ default ของตาราง',
+    compliant: 'เรียบร้อยแล้ว',
+  };
+  const columns = [
+    { key: 'schemaName', label: 'schema', width: 22 },
+    { key: 'tableName', label: 'ตาราง', width: 34 },
+    { key: 'engine', label: 'engine', width: 11 },
+    { key: 'tableCharset', label: 'charset ของตาราง', width: 18 },
+    { key: 'tableCollation', label: 'collation ของตาราง', width: 26 },
+    { key: 'statusText', label: 'สถานะ', width: 22 },
+    { key: 'columnsPending', label: 'คอลัมน์ที่ยังไม่ตรง', width: 18 },
+    { key: 'textColumns', label: 'คอลัมน์ข้อความทั้งหมด', width: 20 },
+    { key: 'approxRows', label: 'จำนวนแถว (ประมาณ)', width: 20 },
+    { key: 'sizeBytes', label: 'ขนาด (ไบต์)', width: 16 },
+    { key: 'sizeMB', label: 'ขนาด (MB)', width: 13 },
+    { key: 'rowFormat', label: 'row format', width: 14 },
+  ];
+  const rows = data.rows.map((r) => ({
+    ...r,
+    statusText: STATUS_TH[r.status] || r.status,
+    sizeMB: Math.round((r.sizeBytes / 1024 / 1024) * 100) / 100,
+  }));
+
+  const buf = xlsx.workbook({ sheetName: `ไม่ใช่ ${target.charset}`, columns, rows });
+  const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="charset-tables-${stamp}.xlsx"`);
+  res.setHeader('Content-Length', buf.length);
+  res.end(buf);
+  log.audit('tables.export', { sessionId: req.sess.id, rows: rows.length, status, target });
 }));
 
 /** Everything the single-table workspace needs, in one round trip. */

@@ -49,7 +49,11 @@ export async function render(host, params) {
             <option value="name:asc">ชื่อตาราง</option>
           </select></label>
       </div>
-      <div class="segbar" id="tl-status"></div>
+      <div class="row-tight">
+        <div class="segbar" id="tl-status"></div>
+        <div class="spacer"></div>
+        <button class="btn-sm btn-ghost" id="tl-export">ดาวน์โหลดเป็น Excel</button>
+      </div>
     </div>
 
     <div class="card">
@@ -73,6 +77,31 @@ export async function render(host, params) {
     const [sort, dir] = $('#tl-sort', host).value.split(':');
     ui.sort = sort; ui.dir = dir; ui.page = 1;
     load(host);
+  });
+
+  // The export is the list you are looking at, minus the paging: same filters,
+  // every matching row. Exporting page 1 of 17 would be a quietly wrong answer.
+  $('#tl-export', host).addEventListener('click', async () => {
+    const btn = $('#tl-export', host);
+    btn.disabled = true;
+    const was = btn.textContent;
+    btn.textContent = 'กำลังสร้างไฟล์…';
+    try {
+      await api.downloadFile('/api/export/tables.xlsx', {
+        schema: ui.filters.schema,
+        engine: ui.filters.engine,
+        q: ui.filters.q,
+        status: ui.filters.status,
+        sort: ui.sort,
+        dir: ui.dir,
+      }, `charset-tables-${new Date().toISOString().slice(0, 10)}.xlsx`);
+      toast('ดาวน์โหลดไฟล์ Excel แล้ว', 'ok');
+    } catch (err) {
+      toast(`สร้างไฟล์ไม่สำเร็จ: ${err.message}`, 'err', 9000);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = was;
+    }
   });
 
   await load(host);
@@ -170,7 +199,7 @@ async function load(host) {
               <td class="num nowrap">${bytes(r.sizeBytes)}</td>
               <td>${progressDots(r.key)}</td>
               <td><button class="btn-sm ${r.needsChange && !finished(r.key) ? 'btn-primary' : ''}" data-open="${esc(r.key)}">
-                ${openLabel(r)} →</button></td>
+                ${openLabel(r)}</button></td>
             </tr>`).join('')}
         </tbody>
       </table>
