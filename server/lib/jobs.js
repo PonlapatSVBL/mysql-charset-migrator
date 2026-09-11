@@ -247,10 +247,14 @@ async function executeStep(conn, job, step) {
     if (!step.metadataOnly && job.options.backupStrategy && job.options.backupStrategy !== 'none') {
       step.status = 'backing_up';
       log.jobLog(job.id, 'step.backup.start', { stepId: step.id, strategy: job.options.backupStrategy });
+      // Timed because the backup runs inside the maintenance window too, and
+      // on a large table it is routinely as long as the ALTER it protects.
+      const backupStarted = Date.now();
       step.backup = job.options.backupStrategy === 'mysqldump'
         ? await dumpTable(job, step)
         : await copyTable(conn, job, step);
-      log.jobLog(job.id, 'step.backup.done', { stepId: step.id, backup: step.backup });
+      step.backupDurationMs = Date.now() - backupStarted;
+      log.jobLog(job.id, 'step.backup.done', { stepId: step.id, backup: step.backup, durationMs: step.backupDurationMs });
     }
 
     // 3. checksum before
@@ -532,6 +536,7 @@ function snapshot(job, { includeSteps = false } = {}) {
     id: s.id, kind: s.kind, title: s.title, schemaName: s.schemaName, tableName: s.tableName,
     status: s.status, metadataOnly: s.metadataOnly, sql: s.sql, rollbackSql: s.rollbackSql,
     startedAt: s.startedAt, finishedAt: s.finishedAt, alterDurationMs: s.alterDurationMs,
+    backupDurationMs: s.backupDurationMs,
     error: s.error, warnings: s.warnings, risks: s.risks, estimate: s.estimate,
     checksumBefore: s.checksumBefore, checksumAfter: s.checksumAfter, verify: s.verify,
     metaVerify: s.metaVerify, backup: s.backup, rollback: s.rollback,

@@ -9,6 +9,7 @@ import {
   $, $$, esc, num, pct, bytes, duration, note, chip, toast, applyDynamicStyles,
   confirmDialog, localTime, levelKind,
 } from '../util.js';
+import { timeline, timelineLegend } from '../charts.js';
 
 const LIVE = new Set(['queued', 'running', 'paused', 'rolling_back']);
 
@@ -217,6 +218,8 @@ function detailHtml(job, entries) {
       <span class="hint nowrap">${esc(pct(p.pct))} · ${num(p.doneSteps)}/${num(p.totalSteps)} ขั้น</span>
     </div>
 
+    ${stepTimeline(steps)}
+
     ${job.throttle ? note('warn', 'ตัวรันกำลังรอให้โหลดของเซิร์ฟเวอร์ลดลง', `
       ยังไม่เริ่ม rebuild ขั้นถัดไปจนกว่าเซิร์ฟเวอร์จะว่างพอ (ป้องกันการทำ production ช้า)
       <code>Threads_running = ${num(job.throttle.threadsRunning)}</code>
@@ -254,6 +257,45 @@ function detailHtml(job, entries) {
       <span class="hint">เขียนแบบ NDJSON ที่ data/jobs/${esc(job.id)}.ndjson เรียงเก่า→ใหม่</span>
     </div>
     ${logPanel(entries)}`;
+}
+
+/**
+ * Where the maintenance window actually went.
+ *
+ * A single completion percentage answers "how far", never "why so long". Four
+ * things run inside the window per table - the backup copy, the two checksum
+ * passes, and the ALTER everyone estimated for - and on a big table the ALTER
+ * is regularly less than half of it. Next time's estimate comes from this
+ * chart, not from the percentage above it.
+ */
+function stepTimeline(steps) {
+  const rows = steps
+    .map((s) => {
+      const segments = [
+        { kind: 'backup', ms: Number(s.backupDurationMs) || 0, label: 'สำรองข้อมูล' },
+        { kind: 'checksum', ms: Number((s.checksumBefore || {}).durationMs) || 0, label: 'checksum ก่อน' },
+        { kind: 'alter', ms: Number(s.alterDurationMs) || 0, label: 'ALTER' },
+        { kind: 'checksum', ms: Number((s.checksumAfter || {}).durationMs) || 0, label: 'checksum หลัง' },
+      ];
+      const measured = segments.reduce((a, x) => a + x.ms, 0);
+      // Whatever the step spent outside the four measured phases: waiting for
+      // the server to go quiet, SHOW CREATE TABLE, metadata verification.
+      const wall = s.startedAt && s.finishedAt
+        ? new Date(s.finishedAt).getTime() - new Date(s.startedAt).getTime() : 0;
+      if (wall > measured) segments.push({ kind: 'other', ms: wall - measured, label: 'รอคิว / ตรวจ metadata' });
+      return { label: `${s.tableName || s.schemaName || s.kind}`, segments };
+    })
+    .filter((r) => r.segments.some((s) => s.ms > 0));
+
+  if (!rows.length) return '';
+  return `<h4>เวลาที่ใช้จริงในแต่ละขั้น</h4>
+    ${timeline(rows)}
+    ${timelineLegend([
+    { kind: 'backup', label: 'สำรองข้อมูล' },
+    { kind: 'checksum', label: 'checksum ก่อน/หลัง' },
+    { kind: 'alter', label: 'ALTER' },
+    { kind: 'other', label: 'รอคิว / ตรวจ metadata' },
+  ])}`;
 }
 
 function banner(job) {
