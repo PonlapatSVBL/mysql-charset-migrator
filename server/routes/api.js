@@ -459,7 +459,10 @@ router.post('/plan', requireSession, asyncHandler(async (req, res) => {
     target,
     session: { host: req.sess.host, port: req.sess.port, user: req.sess.user },
     options: {
-      strategy: body.strategy === 'modify_columns' ? 'modify_columns' : 'convert_table',
+      strategy: body.strategy === 'convert_table' ? 'convert_table' : 'modify_columns',
+      // Absent = every column that needs it. Present (even empty) = the
+      // operator's explicit tick list, honoured as given.
+      columns: Array.isArray(body.columns) ? body.columns.map(String) : undefined,
       includeSchemaDefaults: wantSchemaDefaults,
       includeTableDefaults: body.includeTableDefaults !== false,
       algorithm: ['DEFAULT', 'COPY', 'INPLACE'].includes(body.algorithm) ? body.algorithm : 'DEFAULT',

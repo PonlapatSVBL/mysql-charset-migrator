@@ -535,18 +535,34 @@ function stepPlan(st, at) {
     locked,
     lockReason: 'เก็บ baseline ที่ขั้น 2 ก่อน',
     body: `
+      ${detail.pendingColumns.length ? `
+      <div class="field" id="pl-cols">
+        <span>คอลัมน์ที่จะแปลง <span class="hint" id="pl-colcount"></span></span>
+        <div class="collist">${detail.pendingColumns.map((c) => `
+          <label class="check" title="${esc(c.columnCharset)} / ${esc(c.columnCollation)}">
+            <input type="checkbox" data-col="${esc(c.columnName)}"${isIdColumn(c.columnName) ? ' checked' : ''}>
+            <span class="mono">${esc(c.columnName)}</span>
+            <span class="hint mono trunc">${esc(c.columnType)}</span>
+            ${c.columnKey ? chip(c.columnKey, 'chip-info') : ''}
+          </label>`).join('')}</div>
+        <div class="row-tight">
+          <button class="btn-sm btn-ghost" data-pick="id">เฉพาะ *_id</button>
+          <button class="btn-sm btn-ghost" data-pick="all">ทั้งหมด</button>
+          <button class="btn-sm btn-ghost" data-pick="none">ล้าง</button>
+        </div>
+      </div>` : ''}
       ${collapse('ตัวเลือกขั้นสูง', `
         <div class="row">
           <label class="field"><span>วิธีแปลง</span>
             <select id="pl-strategy">
-              <option value="convert_table" selected>CONVERT TO CHARACTER SET ทั้งตาราง (แนะนำ)</option>
-              <option value="modify_columns">MODIFY COLUMN ทีละคอลัมน์</option>
+              <option value="modify_columns" selected>MODIFY COLUMN ทีละคอลัมน์ (แนะนำ)</option>
+              <option value="convert_table">CONVERT TO CHARACTER SET ทั้งตาราง</option>
             </select></label>
           <label class="field"><span>สำรองก่อนแปลง</span>
             <select id="pl-backup">
-              <option value="table_copy" selected>ก๊อปตารางไว้ในฐานข้อมูล (ย้อนกลับเร็วสุด)</option>
+              <option value="none" selected>ไม่สำรอง (ย้อนได้แค่โครงสร้าง ไม่ได้ข้อมูล)</option>
+              <option value="table_copy">ก๊อปตารางไว้ในฐานข้อมูล (ย้อนกลับเร็วสุด)</option>
               <option value="mysqldump">mysqldump ลงไฟล์</option>
-              <option value="none">ไม่สำรอง (ย้อนได้แค่โครงสร้าง ไม่ได้ข้อมูล)</option>
             </select></label>
           <div class="field"><span>&nbsp;</span>
             <label class="check"><input type="checkbox" id="pl-schemadef"> แก้ default ของ schema ด้วย ตัวนี้กระทบทั้ง schema</label>
@@ -560,15 +576,44 @@ function stepPlan(st, at) {
   });
 }
 
+/** The default tick: id columns are the ones a join breaks on when the
+ *  collations drift apart, so they are what an operator almost always means. */
+function isIdColumn(name) {
+  return /_id$/i.test(name);
+}
+
 function wirePlan(host) {
   const btn = $('#pl-build', host);
   if (!btn) return;
+
+  const boxes = $$('#pl-cols input[data-col]', host);
+  const picked = () => boxes.filter((b) => b.checked).map((b) => b.dataset.col);
+  const count = $('#pl-colcount', host);
+  const sel = $('#pl-strategy', host);
+  const sync = () => {
+    // CONVERT TO rewrites every column whatever is ticked, so the picker is
+    // only honest while MODIFY COLUMN is the strategy.
+    const cols = $('#pl-cols', host);
+    if (cols) cols.hidden = sel.value !== 'modify_columns';
+    if (count) count.textContent = `${picked().length}/${boxes.length}`;
+  };
+  for (const b of boxes) b.addEventListener('change', sync);
+  sel.addEventListener('change', sync);
+  for (const b of $$('#pl-cols [data-pick]', host)) {
+    b.addEventListener('click', () => {
+      for (const c of boxes) c.checked = b.dataset.pick === 'all' || (b.dataset.pick === 'id' && isIdColumn(c.dataset.col));
+      sync();
+    });
+  }
+  sync();
+
   btn.addEventListener('click', async () => {
     btn.disabled = true;
     $('#pl-status', host).textContent = 'กำลังสร้างคำสั่ง…';
     try {
       const { planId, plan } = await api.plan(tableBody(key, {
-        strategy: $('#pl-strategy', host).value,
+        strategy: sel.value,
+        columns: sel.value === 'modify_columns' ? picked() : undefined,
         backupStrategy: $('#pl-backup', host).value,
         includeSchemaDefaults: $('#pl-schemadef', host).checked,
         includeTableDefaults: true,

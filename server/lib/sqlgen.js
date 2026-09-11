@@ -32,9 +32,11 @@ function stepId(kind, schemaName, tableName, extra = '') {
   return `${kind}-${h}`;
 }
 
-/** Is this column in scope for a charset change? */
-function needsColumnChange(col, target) {
+/** Is this column in scope for a charset change? `pick`, when given, is the
+ *  operator's explicit column selection and narrows the scope to it. */
+function needsColumnChange(col, target, pick = null) {
   if (!col.columnCharset) return false;
+  if (pick && !pick.has(col.columnName)) return false;
   return col.columnCharset !== target.charset || col.columnCollation !== target.collation;
 }
 
@@ -128,9 +130,9 @@ function impossibleDdlRisk(options) {
 }
 
 /** Static (metadata-only) risk flags for one table. */
-function tableRisks(table, target) {
+function tableRisks(table, target, pick = null) {
   const risks = [];
-  const changing = table.columns.filter((c) => needsColumnChange(c, target));
+  const changing = table.columns.filter((c) => needsColumnChange(c, target, pick));
   const srcWidths = [...new Set(changing.map((c) => bpc(c.columnCharset)))];
   const targetWidth = bpc(target.charset);
   const widening = srcWidths.some((w) => w < targetWidth);
@@ -164,7 +166,7 @@ function tableRisks(table, target) {
   }
   if (changing.some((c) => c.columnKey === 'UNI') || table.indexes.some((i) => i.unique && i.parts.some((p) => {
     const col = table.columns.find((c) => c.columnName === p.columnName);
-    return col && needsColumnChange(col, target);
+    return col && needsColumnChange(col, target, pick);
   }))) {
     risks.push({ level: 'warn', code: 'unique_collation', message: 'มี UNIQUE index บนคอลัมน์ที่จะเปลี่ยน collation — ค่าที่เคยต่างกันอาจกลายเป็นค่าซ้ำ ทำให้ ALTER ล้มเหลว (ตรวจได้ในหน้า Preflight)' });
   }
@@ -180,8 +182,8 @@ function tableRisks(table, target) {
         const isText = INDEXED_TEXT_TYPES.test(col.dataType);
         const chars = part.subPart || col.charMaxLen || 0;
         if (isText) {
-          const width = needsColumnChange(col, target) ? targetWidth : bpc(col.columnCharset);
-          if (needsColumnChange(col, target)) touches = true;
+          const width = needsColumnChange(col, target, pick) ? targetWidth : bpc(col.columnCharset);
+          if (needsColumnChange(col, target, pick)) touches = true;
           bytes += Number(chars) * width;
         } else {
           bytes += 8;
@@ -197,7 +199,7 @@ function tableRisks(table, target) {
     let rowBytes = 0;
     for (const col of table.columns) {
       if (!INDEXED_TEXT_TYPES.test(col.dataType) || /text$/i.test(col.dataType)) continue;
-      const width = needsColumnChange(col, target) ? targetWidth : bpc(col.columnCharset);
+      const width = needsColumnChange(col, target, pick) ? targetWidth : bpc(col.columnCharset);
       rowBytes += Number(col.charMaxLen || 0) * width;
     }
     if (rowBytes > 65535) {
@@ -245,6 +247,8 @@ function ghostCommand(table, target, session) {
  *
  * options: {
  *   strategy: 'convert_table' | 'modify_columns',
+ *   columns: string[] - with modify_columns, the exact columns to touch
+ *                       (omit for "every column that needs it"),
  *   includeSchemaDefaults, includeTableDefaults,
  *   algorithm: 'DEFAULT'|'COPY'|'INPLACE', lockMode: 'DEFAULT'|'SHARED'|'NONE',
  *   disableFkChecks, order: 'size_asc'|'size_desc'|'name',
@@ -254,7 +258,7 @@ function ghostCommand(table, target, session) {
  */
 function buildPlan({ tables, schemaRows = [], target, options = {}, session = {} }) {
   const opts = {
-    strategy: 'convert_table',
+    strategy: 'modify_columns',
     includeSchemaDefaults: true,
     includeTableDefaults: true,
     algorithm: 'DEFAULT',
@@ -269,6 +273,11 @@ function buildPlan({ tables, schemaRows = [], target, options = {}, session = {}
   const tgtCollation = charsetName(target.collation);
   const suffix = alterSuffix(opts);
   const steps = [];
+  // An explicit selection only means anything per column; CONVERT TO rewrites
+  // the whole table whatever we list. An empty array is a real answer ("none"),
+  // so the filter keys off Array.isArray, not on length.
+  const pick = opts.strategy === 'modify_columns' && Array.isArray(opts.columns)
+    ? new Set(opts.columns) : null;
 
   if (opts.includeSchemaDefaults) {
     for (const s of schemaRows) {
@@ -298,12 +307,20 @@ function buildPlan({ tables, schemaRows = [], target, options = {}, session = {}
   });
 
   for (const table of sorted) {
-    const changing = table.columns.filter((c) => needsColumnChange(c, target));
+    const changing = table.columns.filter((c) => needsColumnChange(c, target, pick));
+    const skipped = pick ? table.columns.filter((c) => needsColumnChange(c, target)).length - changing.length : 0;
     const tableDefaultWrong = table.tableCollation !== tgtCollation;
     if (!changing.length && !tableDefaultWrong) continue;
 
     const fqn = qq(table.schemaName, table.tableName);
-    const risks = [...tableRisks(table, target), ...impossibleDdlRisk(opts)];
+    const risks = [...tableRisks(table, target, pick), ...impossibleDdlRisk(opts)];
+    if (skipped > 0) {
+      risks.push({
+        level: 'warn',
+        code: 'partial_columns',
+        message: `เลือกแปลงบางคอลัมน์ อีก ${skipped} คอลัมน์ที่ยังไม่ตรง target จะถูกข้ามไว้ ตารางนี้จะมี charset ปนกันจนกว่าจะแปลงครบ`,
+      });
+    }
     const sizeBytes = table.dataLength + table.indexLength;
     // Columns whose charset differs from their table default must be restored
     // individually on rollback, otherwise CONVERT TO would flatten them.
