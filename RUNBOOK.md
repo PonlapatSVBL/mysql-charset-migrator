@@ -18,6 +18,100 @@ npm run check     # static import check + 38 self-tests → ต้องได�
 
 ---
 
+## บทบาทและการแบ่งงาน (อ่านก่อน Phase 0)
+
+งานนี้ **แบ่งตาม "คนละ phase" ไม่ได้** — Phase 4 (baseline) ถึง Phase 7 (verify) ต้องเป็นหน้าต่างเดียวที่ไม่มี write เข้าตารางในขอบเขตเลย และ session ของเครื่องมือผูกกับโปรเซสเดียว จึงแบ่งตาม **บทบาท** โดยมีคนจับคอนโซลคนเดียวตลอดงาน
+
+### ข้อจำกัดที่บังคับวิธีแบ่ง (มาจากพฤติกรรมจริงของเครื่องมือ ไม่ใช่ความชอบ)
+
+| ข้อจำกัด | ผลต่อการแบ่งงาน |
+|---|---|
+| boot key ถูกสร้างใหม่ทุกครั้งที่ start และ session/รหัสผ่านอยู่ในหน่วยความจำเท่านั้น | สลับคนจับคอนโซลกลางงาน = restart = job หายจากหน่วยความจำ (Abort criteria ข้อ 21) → **operator ต้องเป็นคนเดียวตั้งแต่ Phase 1 ถึง Phase 8** |
+| `dumpTable()` ดึงรหัสผ่านจาก session | session หมดอายุ = backup ของ step ถัดไปล้ม (ข้อ 20) → operator ต้องนั่งเฝ้าจนจบ window |
+| checksum ก่อน/หลังเทียบกันตรงๆ | ใครก็ตามที่เขียน DB ในขอบเขตระหว่าง Phase 4–7 จะทำให้ auto-rollback ทำงานโดยไม่จำเป็น (ข้อ 6, 19) → **ทุกบทบาทที่ไม่ใช่ operator ห้ามแตะ DB ช่วงนั้น** |
+| `forceDespiteBlock` / `acknowledgeNoPreflight` ถูกบันทึกถาวรใน job manifest + audit | เป็นการยอมสูญเสียข้อมูลอย่างจงใจ → **ห้าม operator อนุมัติตัวเอง** |
+
+### สามบทบาท
+
+| บทบาท | หน้าที่หลัก | ห้ามทำ |
+|---|---|---|
+| **Operator** — ผู้ปฏิบัติงานหน้าคอนโซล | รันเครื่องมือ, สร้าง preflight / baseline / plan / job, เฝ้า job, สั่ง rollback | อนุมัติแผนของตัวเอง · ตัดสินขนาด window เอง |
+| **Verifier** — ผู้ตรวจทาน (คู่ตรวจ) | ตรวจสิทธิ์และเนื้อที่ก่อนเริ่ม, ตีความ preflight finding, **อ่านทาน DDL ทุกบรรทัดในแผน**, ยืนยันผลหลังแปลง, ถือ abort criteria | กดปุ่มบนคอนโซล · แก้ข้อมูลใน scope ระหว่าง Phase 4–7 |
+| **Perf owner** — เจ้าของเกณฑ์ performance | replica topology, ค่า throttle, ขนาด maintenance window, ตัดสินว่าตารางไหนใหญ่เกินจนต้องไปเส้น pt-osc / gh-ost | สั่งงานคอนโซลโดยตรง |
+
+**ผู้รับผิดชอบรอบนี้** (เติมก่อนเริ่มทุกครั้ง):
+
+| บทบาท | ชื่อ | ช่องทางติดต่อระหว่าง window |
+|---|---|---|
+| Operator | | |
+| Verifier | | |
+| Perf owner | | |
+
+### ความรับผิดชอบต่อ phase
+
+| Phase | Operator | Verifier | Perf owner |
+|---|---|---|---|
+| 0.1 สิทธิ์ DB user | — | **ทำ** | — |
+| 0.2 เนื้อที่ดิสก์ | — | **ทำ** | ตรวจ |
+| 0.3 replica topology | — | — | **ทำ** |
+| 0.4 maintenance window | ให้ข้อมูลเวลาจากการซ้อม | ตรวจ | **ทำ / ตัดสิน** |
+| 0.5 dump นิยาม view / routine / trigger / event | — | **ทำ** | — |
+| 0.6 ซ้อมบน staging | **ทำ** (รันเหมือนจริงคนเดียว) | ตรวจผล | รับเวลาต่อ GB ไปคำนวณ window |
+| 1 เชื่อมต่อ + อ่านภาพรวม | **ทำ** | ตรวจ chip เตือน (`read_only` / `replica` / ไม่พบ `ALTER`) | ตรวจ `pendingBytes` |
+| 2 ลำดับตาราง | **ทำ** | ตรวจ | เสนอลำดับตามความเสี่ยงต่อโหลด |
+| 3.1 รัน preflight | **ทำ** | — | — |
+| 3.2 ตีความ finding | ร่วม | **ทำ / ตัดสิน** | — |
+| 3.3 เกณฑ์ไปต่อ | — | **ตัดสิน** | — |
+| 4 baseline checksum | **ทำ** | บันทึก `checksumId` | — |
+| 5.1 สร้างแผน | **ทำ** | — | — |
+| 5.2 อ่านทานแผน | ร่วม | **ทำ / ตัดสิน** | ตรวจเฉพาะตารางใหญ่ |
+| 5.3 เลือก backup strategy | เสนอ | ตรวจ | **ตัดสิน** (ขึ้นกับเนื้อที่และเวลา) |
+| 6.1 dry run | **ทำ** | ตรวจ DDL ที่ออกมา | — |
+| 6.2 รันจริง | **ทำ คนเดียว** | เฝ้าจอ (ไม่สั่ง) | เฝ้า metric ฝั่ง DB |
+| 6.3 เส้น pt-osc / gh-ost | รับคำสั่งไปรัน | ตรวจ | **ตัดสิน** |
+| 7 ยืนยันผล | รัน query ที่ verifier สั่ง | **ทำ / ตัดสิน** | ตรวจ replica lag กลับสู่ปกติ |
+| 8 rollback | **ทำ** | ยืนยันว่าครบ | — |
+| 9.1 สร้าง object กลับ | ร่วม | **ทำ** (แบ่งตาม schema ได้) | — |
+| 9.2–9.4 cleanup + default | **ทำ** | ตรวจ | ตรวจ config ฝั่ง server |
+| 9.5 ปิดงาน | รวบรวมหลักฐาน | **ตรวจครบ** | รับเวลาจริงต่อ GB |
+
+### Gate ที่ต้องมีสองคนเห็นชอบ (operator คนเดียวไม่พอ)
+
+1. ผ่าน Phase 3.3 เมื่อ `gate` เป็น `warn` — operator + verifier
+2. ใช้ `forceDespiteBlock` หรือ `acknowledgeNoPreflight` — operator + verifier + perf owner **และบันทึกเหตุผลเป็นลายลักษณ์อักษร**
+3. เลือก `backupStrategy: none` บน production — ห้าม เว้นแต่มี snapshot ระดับ instance ที่ทดสอบ restore แล้ว (perf owner ยืนยัน)
+4. เริ่ม Phase 6.2 — ต้องมี `preflightId` + `checksumId` + `planId` ครบ และ verifier ยืนยันว่า write หยุดแล้วจริง
+5. สั่งรันต่อหลังเจอ checksum ไม่ตรง — **ห้ามทุกกรณีจนกว่าจะรู้สาเหตุ** (Abort ข้อ 13)
+
+### งานที่ขนานกันได้ — เฉพาะก่อนเปิด window
+
+- Phase 0.1–0.5 ทำพร้อมกันได้ทั้งสามคน (verifier ฝั่งสิทธิ์/เนื้อที่/object, perf owner ฝั่ง replica)
+- Phase 0.6 ซ้อม staging — operator รันคนเดียว แต่ส่งเวลาต่อตารางให้ perf owner ทันทีที่ได้
+- Phase 9.1 สร้าง view / routine / trigger / event กลับ — แบ่งตาม schema ได้ **หลัง** verify ผ่านแล้วเท่านั้น
+
+### งานที่ห้ามแบ่ง
+
+- **Phase 6.2 รันจริง** — คนอื่นดูจอได้ สั่งไม่ได้ และห้ามเปิด session ที่สองไปแตะ DB เด็ดขาด
+- **Phase 4 ถึง 7** — ห้ามมี write ใดๆ เข้าตารางในขอบเขต รวมถึง query แก้ข้อมูลที่ verifier "แค่อยากลอง"
+
+### ของที่ใช้ส่งต่อกัน (อย่าส่งงานกันด้วยปากเปล่า)
+
+| ไฟล์ | ใครสร้าง | ใครอ่าน |
+|---|---|---|
+| `data/snapshots/preflight-*.json` | operator | verifier — ตีความ finding (3.2) |
+| `data/snapshots/checksum-*.json` | operator | verifier — เทียบ baseline (7.2) |
+| `data/plans/plan-*.json` | operator | verifier — อ่านทาน DDL (5.2), perf owner — ตารางใหญ่ (6.3) |
+| `data/jobs/job-*.json` + `.ndjson` | เครื่องมือ | ทุกคน — สภาพจริงถ้าแอป restart (Abort ข้อ 21) |
+| `data/audit/audit-*.ndjson` | เครื่องมือ | verifier — หลักฐานปิดงาน (9.5) |
+
+อ้าง `preflightId` / `checksumId` / `planId` / `jobId` ในทุกการสื่อสารระหว่าง window
+
+### สิทธิ์สั่ง abort
+
+**ทุกบทบาทสั่งหยุดได้ ไม่ต้องขออนุมัติ** เมื่อเจอข้อใดข้อหนึ่งใน Abort criteria ท้ายเอกสารนี้
+การกลับมารันต่อหลัง abort ต้องผ่าน Phase 3 ใหม่ทั้งชุด ไม่ใช่รันต่อจากจุดเดิม
+
+---
 ## Phase 0 — Pre-checks (ก่อนแตะอะไรเลย)
 
 ### 0.1 ตรวจสิทธิ์ของ DB user
