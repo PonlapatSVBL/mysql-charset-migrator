@@ -123,56 +123,245 @@ async function dumpTable(job, step) {
 }
 
 /**
+ * Secondary indexes that can be dropped for the load and re-created verbatim
+ * afterwards.
+ *
+ * Loading into a table that already carries every secondary index means a
+ * random B-tree insertion per index per row - the slowest way to fill a table
+ * there is, and on a wide table it makes the backup take longer than the ALTER
+ * it protects. Dropping them first and rebuilding once at the end turns that
+ * into a single sorted build.
+ *
+ * The filter is deliberately narrow. Anything this cannot reproduce exactly -
+ * functional, fulltext, spatial, hash, invisible, descending-with-prefix
+ * oddities - is left in place and loaded the slow way, because a restored
+ * table whose indexes differ from the table it replaced is a worse outcome
+ * than a slow backup.
+ */
+function deferrableIndexes(indexRows) {
+  const byName = new Map();
+  const skipped = new Set();
+  for (const r of indexRows) {
+    const name = r.Key_name;
+    if (name === 'PRIMARY') continue;
+    const exotic = String(r.Index_type).toUpperCase() !== 'BTREE'
+      || (r.Expression !== undefined && r.Expression !== null)
+      || r.Visible === 'NO' || r.Ignored === 'YES'
+      || !r.Column_name;
+    if (exotic) { skipped.add(name); continue; }
+    if (!byName.has(name)) {
+      byName.set(name, { name, unique: Number(r.Non_unique) === 0, parts: [] });
+    }
+    byName.get(name).parts.push({
+      column: r.Column_name,
+      subPart: r.Sub_part ? Number(r.Sub_part) : null,
+      desc: r.Collation === 'D',
+      seq: Number(r.Seq_in_index),
+    });
+  }
+  for (const name of skipped) byName.delete(name);
+  const list = [...byName.values()];
+  for (const ix of list) ix.parts.sort((a, b) => a.seq - b.seq);
+  return list;
+}
+
+function indexClause(ix) {
+  const cols = ix.parts
+    .map((p) => `${q(p.column)}${p.subPart ? `(${p.subPart})` : ''}${p.desc ? ' DESC' : ''}`)
+    .join(', ');
+  return `${ix.unique ? 'UNIQUE ' : ''}INDEX ${q(ix.name)} (${cols})`;
+}
+
+/** A primary key the copy can walk in order. Prefixed parts are refused: the
+ *  keyset cursor compares whole column values, so a prefix key would not be
+ *  the ordering the LIMIT is applied in. */
+function chunkablePk(indexRows) {
+  const pk = indexRows.filter((r) => r.Key_name === 'PRIMARY')
+    .sort((a, b) => Number(a.Seq_in_index) - Number(b.Seq_in_index));
+  if (!pk.length) return null;
+  if (pk.some((r) => r.Sub_part || !r.Column_name)) return null;
+  return pk.map((r) => r.Column_name);
+}
+
+/**
  * In-database shadow copy. Rollback becomes an atomic RENAME.
  *
- * Two limitations the operator must know about (both are in RUNBOOK 8.3):
- *  - CREATE TABLE ... LIKE copies indexes but NOT foreign keys, so a restored
- *    table needs its FKs re-added. We capture the source DDL here so the
- *    constraints can be read back off the job manifest.
+ * The load is chunked, indexes are built once at the end, and exact row counts
+ * are only paid for on tables small enough to afford them - see the three
+ * sections below. What has not changed, and the operator still has to know
+ * (RUNBOOK 8.3):
+ *  - CREATE TABLE ... LIKE copies indexes but NOT foreign keys or triggers, so
+ *    a restored table needs them re-added. The source DDL is captured on the
+ *    step so they can be read back off the job manifest.
  *  - the copy is not serialised against concurrent writes; the ALTER that
- *    follows takes at least a SHARED lock, but writes landing between the
- *    INSERT..SELECT and the ALTER would not be in the backup. Run inside a
- *    maintenance window if the table is written to continuously.
+ *    follows takes at least a SHARED lock, but writes landing between the last
+ *    chunk and the ALTER would not be in the backup. Run inside a maintenance
+ *    window if the table is written to continuously.
  */
 async function copyTable(conn, job, step) {
   const bak = backupTableName(step.tableName, job.stamp);
   const src = qq(step.schemaName, step.tableName);
   const dst = qq(step.schemaName, bak);
-  await conn.query(`CREATE TABLE ${dst} LIKE ${src}`);
-  await conn.query(`INSERT INTO ${dst} SELECT * FROM ${src}`);
-
-  const [[c]] = await conn.query(`SELECT COUNT(*) AS n FROM ${dst}`);
-  const [[srcRows]] = await conn.query(`SELECT COUNT(*) AS n FROM ${src}`);
-
-  // Preserve the counter: CREATE ... LIKE keeps the definition but a fresh
-  // table restarts AUTO_INCREMENT from the highest copied value + 1, which
-  // would hand out ids that the original had already reserved.
-  let autoIncrement = null;
-  const [[aiRow]] = await conn.query(
-    `SELECT AUTO_INCREMENT AS ai FROM information_schema.TABLES
-      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?`, [step.schemaName, step.tableName]);
-  if (aiRow && aiRow.ai !== null && aiRow.ai !== undefined) {
-    autoIncrement = Number(aiRow.ai);
-    try { await conn.query(`ALTER TABLE ${dst} AUTO_INCREMENT = ${autoIncrement}`); } catch { /* not critical */ }
-  }
-
+  const runner = { ...config.runner, ...(job.options.runner || {}) };
   const meta = job.tableMeta[`${step.schemaName}.${step.tableName}`];
-  const foreignKeys = (meta && meta.foreignKeys ? meta.foreignKeys : [])
-    .filter((f) => f.direction === 'outbound');
-  const badName = backupTableName(`bad_${step.tableName}`, job.stamp);
-  return {
-    kind: 'table_copy',
-    backupTable: `${step.schemaName}.${bak}`,
-    rows: Number(c.n),
-    sourceRows: Number(srcRows.n),
-    consistent: Number(c.n) === Number(srcRows.n),
-    autoIncrement,
-    foreignKeysNotCopied: foreignKeys.length,
-    restoreSql: [
-      `RENAME TABLE ${src} TO ${qq(step.schemaName, badName)}, ${dst} TO ${src};`,
-    ],
-    restoreNotes: 'CREATE TABLE ... LIKE ไม่คัดลอก foreign key และ trigger — หลัง RENAME ต้องเพิ่มกลับจาก createTableBefore ในไฟล์ manifest',
-  };
+  const sizeBytes = Number((step.estimate && step.estimate.bytes) || 0);
+  const approxRows = Number((step.estimate && step.estimate.rows) || 0);
+
+  // Generated columns cannot be assigned, so `SELECT *` into a LIKE-copy fails
+  // outright on any table that has one. Name the storable columns instead.
+  const storable = (meta && meta.columns ? meta.columns : [])
+    .filter((c) => !(c.generationExpression && String(c.generationExpression).length));
+  const columnList = storable.length && meta.columns.length !== storable.length
+    ? storable.map((c) => q(c.columnName)).join(', ')
+    : null;
+  const intoCols = columnList ? ` (${columnList})` : '';
+  const selectCols = columnList || '*';
+
+  await conn.query(`CREATE TABLE ${dst} LIKE ${src}`);
+
+  try {
+    const [indexRows] = await conn.query(`SHOW INDEX FROM ${dst}`);
+    const originalIndexNames = [...new Set(indexRows.map((r) => r.Key_name))];
+
+    // --- 1. drop secondary indexes while the table is still empty ----------
+    const deferred = deferrableIndexes(indexRows);
+    if (deferred.length) {
+      await conn.query(`ALTER TABLE ${dst} ${deferred.map((ix) => `DROP INDEX ${q(ix.name)}`).join(', ')}`);
+      log.jobLog(job.id, 'step.backup.indexes.deferred', {
+        stepId: step.id, indexes: deferred.map((ix) => ix.name),
+      });
+    }
+
+    // --- 2. load in chunks, in primary-key order --------------------------
+    const pk = chunkablePk(indexRows);
+    const chunkRows = Math.max(Number(runner.copyChunkRows) || 50000, 1000);
+    let rows = 0;
+    let chunks = 0;
+    let chunked = false;
+
+    if (!pk) {
+      // No usable primary key: one statement is the only option. It is a
+      // single transaction over the whole table, it cannot report progress,
+      // and it cannot be cancelled - which is worth saying out loud.
+      log.jobLog(job.id, 'step.backup.unchunked', { stepId: step.id, reason: 'ไม่มี primary key ที่เดินตามลำดับได้' });
+      const [res] = await conn.query(`INSERT INTO ${dst}${intoCols} SELECT ${selectCols} FROM ${src}`);
+      rows = Number(res.affectedRows) || 0;
+      chunks = 1;
+    } else {
+      chunked = true;
+      const order = pk.map(q).join(', ');
+      const orderDesc = pk.map((c) => `${q(c)} DESC`).join(', ');
+      let cursor = null;
+      let lastPersist = 0;
+      for (;;) {
+        // The old single-statement copy checked nothing until it finished.
+        // Between chunks is where cancel and pause become real.
+        if (job.cancelRequested) throw new Error('ยกเลิกโดยผู้ใช้ระหว่างสำรองข้อมูล');
+        await waitWhilePaused(job);
+        const where = cursor ? `WHERE (${order}) > (${cursor.map(() => '?').join(', ')})` : '';
+        const [res] = await conn.query(
+          `INSERT INTO ${dst}${intoCols} SELECT ${selectCols} FROM ${src} ${where} ORDER BY ${order} LIMIT ${chunkRows}`,
+          cursor || []
+        );
+        const n = Number(res.affectedRows) || 0;
+        rows += n;
+        chunks += 1;
+        step.backupProgress = {
+          rows,
+          approxRows,
+          chunks,
+          pct: approxRows ? Math.min(Number(((rows / approxRows) * 100).toFixed(1)), 100) : null,
+        };
+        if (n < chunkRows) break;
+        // The cursor is the last key just written; reading it back off the
+        // copy is a one-row clustered-index lookup.
+        const [[last]] = await conn.query(`SELECT ${order} FROM ${dst} ORDER BY ${orderDesc} LIMIT 1`);
+        if (!last) break;
+        cursor = pk.map((c) => last[c]);
+        // Persisting every chunk would rewrite the manifest thousands of
+        // times on a large table; twice a second is enough to follow along.
+        if (Date.now() - lastPersist > 2000) { lastPersist = Date.now(); persist(job); }
+      }
+      step.backupProgress = { rows, approxRows, chunks, pct: 100 };
+    }
+
+    // --- 3. rebuild the deferred indexes in one pass ----------------------
+    if (deferred.length) {
+      await conn.query(`ALTER TABLE ${dst} ${deferred.map((ix) => `ADD ${indexClause(ix)}`).join(', ')}`);
+    }
+
+    // A backup missing an index is a restore that silently changes the table's
+    // query plans, so this is checked rather than assumed.
+    const [afterRows] = await conn.query(`SHOW INDEX FROM ${dst}`);
+    const now = new Set(afterRows.map((r) => r.Key_name));
+    const missing = originalIndexNames.filter((n) => !now.has(n));
+    if (missing.length) {
+      throw new Error(`สร้าง index บนตารางสำรองกลับมาไม่ครบ: ${missing.join(', ')} — ยกเลิกการสำรองเพื่อไม่ให้ rollback ได้ตารางที่ index ไม่เหมือนเดิม`);
+    }
+
+    // --- row counts, priced by table size ---------------------------------
+    // COUNT(*) is a full index scan on InnoDB. The chunked load already knows
+    // exactly how many rows it wrote, so the copy never needs counting; only
+    // the source does, and only where it is cheap. Same ceiling the checksum
+    // uses (config.scan.exactRowCountMaxBytes).
+    let sourceRows = null;
+    let sourceRowsExact = false;
+    if (sizeBytes > 0 && sizeBytes <= config.scan.exactRowCountMaxBytes) {
+      const [[srcCount]] = await conn.query(`SELECT COUNT(*) AS n FROM ${src}`);
+      sourceRows = Number(srcCount.n);
+      sourceRowsExact = true;
+    } else {
+      sourceRows = approxRows;
+    }
+
+    // Preserve the counter: CREATE ... LIKE keeps the definition but a fresh
+    // table restarts AUTO_INCREMENT from the highest copied value + 1, which
+    // would hand out ids that the original had already reserved.
+    let autoIncrement = null;
+    const [[aiRow]] = await conn.query(
+      `SELECT AUTO_INCREMENT AS ai FROM information_schema.TABLES
+        WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?`, [step.schemaName, step.tableName]);
+    if (aiRow && aiRow.ai !== null && aiRow.ai !== undefined) {
+      autoIncrement = Number(aiRow.ai);
+      try { await conn.query(`ALTER TABLE ${dst} AUTO_INCREMENT = ${autoIncrement}`); } catch { /* not critical */ }
+    }
+
+    const foreignKeys = (meta && meta.foreignKeys ? meta.foreignKeys : [])
+      .filter((f) => f.direction === 'outbound');
+    const badName = backupTableName(`bad_${step.tableName}`, job.stamp);
+    return {
+      kind: 'table_copy',
+      backupTable: `${step.schemaName}.${bak}`,
+      rows,
+      chunked,
+      chunks,
+      chunkRows: chunked ? chunkRows : null,
+      deferredIndexes: deferred.map((ix) => ix.name),
+      generatedColumnsSkipped: meta && meta.columns ? meta.columns.length - storable.length : 0,
+      sourceRows,
+      sourceRowsExact,
+      // Only a claim when both numbers were actually counted; an estimate from
+      // information_schema wobbles on its own and must not read as a verdict.
+      consistent: sourceRowsExact ? rows === sourceRows : null,
+      autoIncrement,
+      foreignKeysNotCopied: foreignKeys.length,
+      restoreSql: [
+        `RENAME TABLE ${src} TO ${qq(step.schemaName, badName)}, ${dst} TO ${src};`,
+      ],
+      restoreNotes: 'CREATE TABLE ... LIKE ไม่คัดลอก foreign key และ trigger — หลัง RENAME ต้องเพิ่มกลับจาก createTableBefore ในไฟล์ manifest',
+    };
+  } catch (err) {
+    // A half-filled table sitting under a backup name is worse than no backup
+    // at all: someone could RENAME it in believing it is complete.
+    try {
+      await conn.query(`DROP TABLE IF EXISTS ${dst}`);
+      log.jobLog(job.id, 'step.backup.cleanup', { stepId: step.id, dropped: `${step.schemaName}.${bak}` });
+    } catch (dropErr) {
+      log.jobLog(job.id, 'step.backup.cleanup.failed', { stepId: step.id, error: dropErr.message });
+      err.message += ` (ลบตารางสำรองที่ค้างไม่สำเร็จ ต้องลบ ${step.schemaName}.${bak} เอง)`;
+    }
+    throw err;
+  }
 }
 
 async function runStatement(conn, sql) {
@@ -536,7 +725,7 @@ function snapshot(job, { includeSteps = false } = {}) {
     id: s.id, kind: s.kind, title: s.title, schemaName: s.schemaName, tableName: s.tableName,
     status: s.status, metadataOnly: s.metadataOnly, sql: s.sql, rollbackSql: s.rollbackSql,
     startedAt: s.startedAt, finishedAt: s.finishedAt, alterDurationMs: s.alterDurationMs,
-    backupDurationMs: s.backupDurationMs,
+    backupDurationMs: s.backupDurationMs, backupProgress: s.backupProgress,
     error: s.error, warnings: s.warnings, risks: s.risks, estimate: s.estimate,
     checksumBefore: s.checksumBefore, checksumAfter: s.checksumAfter, verify: s.verify,
     metaVerify: s.metaVerify, backup: s.backup, rollback: s.rollback,
@@ -584,4 +773,7 @@ function readArchived(id) {
 module.exports = {
   create, start, get, list, cancel, pause, snapshot, rollbackJob,
   listArchived, readArchived, backupTableName,
+  // exported for scripts/selftest.js - the index and chunking rules decide
+  // whether a restored backup is identical to what it replaces
+  deferrableIndexes, indexClause, chunkablePk, copyTable,
 };

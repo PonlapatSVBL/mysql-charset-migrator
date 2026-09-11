@@ -40,6 +40,12 @@ module.exports = {
     maxReplicaLagSec: Number(process.env.CSMIG_MAX_REPLICA_LAG || 30),
     throttleWaitMs: 2000,
     throttleMaxWaits: 150,
+    // Rows per INSERT when taking a table_copy backup. The copy used to be one
+    // statement over the whole table: one transaction, undo that could not be
+    // purged until it finished, no progress and no way to cancel it. Chunking
+    // by primary key fixes all four. Bigger chunks are marginally faster and
+    // proportionally less interruptible.
+    copyChunkRows: Number(process.env.CSMIG_COPY_CHUNK_ROWS || 50000),
     // Emitted as max_execution_time on the RUNNER's connection. MySQL applies
     // it to read queries only, so it does not abort a long ALTER (no
     // server-side timeout exists for DDL - use lock_wait_timeout + KILL).

@@ -507,6 +507,14 @@ SET SESSION max_execution_time = <ms>;   -- ถ้า CSMIG_STMT_TIMEOUT > 0
 | `table_copy` | `CREATE TABLE \`db\`.\`_csmig_<stamp>_<tbl>\` LIKE \`db\`.\`tbl\`` แล้ว `INSERT INTO ... SELECT * FROM ...` แล้วนับแถวยืนยัน | **`RENAME TABLE` สลับกลับแบบ atomic** (เร็วและครบที่สุด) | ใช้เนื้อที่ใน DB เท่าตารางเดิม; ชื่อ backup ถูกตัดที่ 64 อักขระ |
 | `mysqldump` | `spawn('mysqldump', ...)` เขียนไป `data/jobs/<jobId>-backup/<db>.<tbl>.sql` | ใช้ inverse DDL แล้วแนบ note ชี้ path ไฟล์ให้ restore ด้วยมือ | ส่งรหัสผ่านผ่าน env `MYSQL_PWD` (ไม่โผล่ใน `ps`); ต้องมี `mysqldump` ใน `PATH` |
 
+**วิธีคัดลอกของ `table_copy`** (`server/lib/jobs.js` → `copyTable()`) ออกแบบมาให้ตารางใหญ่ไม่ล้มทั้งเซิร์ฟเวอร์
+
+- **แบ่งชุดตาม primary key** ชุดละ `runner.copyChunkRows` แถว (ตั้งต้น 50,000 ปรับด้วย `CSMIG_COPY_CHUNK_ROWS`) เดินด้วย keyset cursor `WHERE (pk) > (last) ORDER BY pk LIMIT n` แทนที่จะเป็นคำสั่งเดียวคลุมทั้งตาราง — undo ไม่บวมค้างจนกว่าจะจบ, มี % ให้ดู, และ**กดยกเลิกได้ระหว่างชุด** ตารางที่ไม่มี primary key (หรือ PK เป็น prefix) ตกกลับไปใช้คำสั่งเดียวและรายงานว่า `chunked: false`
+- **สร้าง secondary index ทีหลัง** ดรอป index ตอนตารางยังว่าง โหลดเสร็จค่อย `ADD INDEX` รอบเดียว (sorted build) แทนการแทรก B-tree แบบสุ่มทีละแถวต่อ index ต่อแถว — index ที่สร้างกลับให้เหมือนเดิมเป๊ะไม่ได้ (functional, fulltext, spatial, hash, invisible) จะ **ไม่ถูกแตะ** และโหลดแบบช้าตามเดิม เพราะตารางสำรองที่ index ไม่เหมือนต้นฉบับแย่กว่า backup ที่ช้า หลังสร้างเสร็จมีการเทียบรายชื่อ index ก่อน/หลัง ถ้าขาดจะ **ล้มทั้ง step** ก่อนที่ `ALTER` จะแตะข้อมูล
+- **ไม่นับ `COUNT(*)` โดยไม่จำเป็น** จำนวนแถวที่คัดลอกได้มาจากผลรวม `affectedRows` ของแต่ละชุดอยู่แล้ว ส่วนฝั่งต้นทางนับจริงเฉพาะตารางที่เล็กกว่า `scan.exactRowCountMaxBytes` (2 GB) ตารางใหญ่ใช้ค่าประมาณจาก information_schema และตั้ง `sourceRowsExact: false` กับ `consistent: null` — ค่าประมาณต้องไม่อ่านเหมือนคำตัดสิน
+- **ล้มแล้วเก็บกวาด** ถ้าคัดลอกล้มหรือถูกยกเลิกกลางทาง ตารางสำรองที่ค้างจะถูก `DROP` ทิ้ง ตารางครึ่งใบที่ใช้ชื่อแบบ backup อันตรายกว่าไม่มี backup เพราะอาจมีคน `RENAME` มันกลับเข้าไป
+- **คอลัมน์ generated ถูกระบุชื่อออกจาก INSERT** `INSERT INTO t SELECT *` ล้มทันทีบนตารางที่มี generated column ตัวคัดลอกจึงไล่ชื่อคอลัมน์ที่เก็บค่าได้จริงแทน `*`
+
 flag ของ mysqldump ที่ใช้: `--single-transaction --quick --hex-blob --routines=false --triggers=false --default-character-set=binary --add-drop-table`
 บน **MySQL** เพิ่ม `--set-gtid-purged=OFF --column-statistics=0` ให้ด้วย; บน **MariaDB** สอง flag นี้ถูกตัดออกอัตโนมัติเพราะ `mysqldump` ของ MariaDB ตอบ `unknown option`
 `--default-character-set=binary` สำคัญมาก — ทำให้ dump เก็บไบต์ดิบ ไม่ให้ client แปลง charset ระหว่างทาง
@@ -536,7 +544,7 @@ flag ของ mysqldump ที่ใช้: `--single-transaction --quick --hex
 - `GET /api/jobs/:id/log` อ่าน NDJSON ของ job (สูงสุด 3,000 บรรทัดล่าสุด default)
 - ทุกบรรทัดผ่าน redaction เดียวกันตอนเขียน — log ที่แสดงจึงไม่มีรหัสผ่านอยู่แล้วโดยโครงสร้าง
 
-**Audit events ที่มี**: `server.start`, `server.stop`, `process.unhandledRejection`, `process.uncaughtException`, `session.connect`, `session.connect.failed`, `session.disconnect`, `session.credential.reveal`, `inventory.export`, `tables.export`, `preflight.start|done|failed`, `checksum.start|done|failed`, `plan.created`, `job.created`, `api.error` และ job events: `job.start`, `job.finish`, `job.error`, `job.cancel.requested`, `job.pause`, `job.resume`, `step.start`, `step.backup.start|done`, `step.checksum.before|after`, `step.warnings`, `step.done`, `step.failed`, `step.meta.mismatch`, `throttle.wait`, `guard.failed`, `rollback.step.start|done|failed`, `rollback.job.start|finish`
+**Audit events ที่มี**: `server.start`, `server.stop`, `process.unhandledRejection`, `process.uncaughtException`, `session.connect`, `session.connect.failed`, `session.disconnect`, `session.credential.reveal`, `inventory.export`, `tables.export`, `preflight.start|done|failed`, `checksum.start|done|failed`, `plan.created`, `job.created`, `api.error` และ job events: `job.start`, `job.finish`, `job.error`, `job.cancel.requested`, `job.pause`, `job.resume`, `step.start`, `step.backup.start|done`, `step.backup.indexes.deferred`, `step.backup.unchunked`, `step.backup.cleanup|cleanup.failed`, `step.checksum.before|after`, `step.warnings`, `step.done`, `step.failed`, `step.meta.mismatch`, `throttle.wait`, `guard.failed`, `rollback.step.start|done|failed`, `rollback.job.start|finish`
 
 ---
 
@@ -651,7 +659,7 @@ curl -s http://127.0.0.1:7343/api/jobs \
    สรุป: ถ้า instance เป็น utf8mb4 ล้วน risk สองตัวนี้จะไม่ทำงาน (ถูกต้องแล้ว) แต่ถ้ามีคอลัมน์ charset ไบต์เดียวปนอยู่ มันจะทำงานและสำคัญมาก
 
 9. **`table_copy` backup ไม่ใช่ snapshot ที่ consistent และไม่คัดลอก foreign key / trigger**
-   `CREATE TABLE ... LIKE` + `INSERT INTO ... SELECT *` ไม่ได้ห่อใน transaction ถ้ามี write เข้ามาระหว่าง copy สำเนาจะไม่ตรงกับตารางต้นฉบับ ณ เวลาใดเวลาหนึ่ง — โค้ดจึงนับแถวทั้งสองฝั่งแล้วรายงาน `backup.sourceRows` และ `backup.consistent` ไว้ใน manifest ให้ตรวจได้ และคัดลอกค่า `AUTO_INCREMENT` ตามต้นฉบับให้ (`CREATE ... LIKE` จะรีเซ็ตตัวนับ ทำให้แจก id ซ้ำที่เคยจ่ายไปแล้ว)
+   การคัดลอกแบ่งเป็นหลายชุด แต่ละชุดคือ transaction ของตัวเอง จึงยิ่งไม่ใช่ snapshot ณ เวลาเดียว ถ้ามี write เข้ามาระหว่าง copy สำเนาจะไม่ตรงกับตารางต้นฉบับ ณ เวลาใดเวลาหนึ่ง — โค้ดจึงรายงาน `backup.rows`, `backup.sourceRows`, `backup.sourceRowsExact` และ `backup.consistent` ไว้ใน manifest ให้ตรวจได้ (`consistent` เป็น `null` เมื่อตารางใหญ่เกินกว่าจะนับต้นทางจริง) และคัดลอกค่า `AUTO_INCREMENT` ตามต้นฉบับให้ (`CREATE ... LIKE` จะรีเซ็ตตัวนับ ทำให้แจก id ซ้ำที่เคยจ่ายไปแล้ว)
    สิ่งที่ยัง **ไม่** คัดลอกให้: foreign key และ trigger — จำนวน FK ที่หายไปรายงานเป็น `backup.foreignKeysNotCopied` และ DDL ต้นฉบับเก็บไว้ใน `step.createTableBefore` สำหรับสร้างกลับ (ขั้นตอนอยู่ใน `RUNBOOK.md` 8.3) ต้องรันในช่วง maintenance window ที่ไม่มี write หรือใช้ `mysqldump --single-transaction` แทน
    ชื่อ backup table `_csmig_<stamp>_<tbl>` ถูก **ตัดที่ 64 อักขระ** ตารางที่ชื่อยาวมากๆ อาจได้ชื่อ backup ที่ชนกัน
 
