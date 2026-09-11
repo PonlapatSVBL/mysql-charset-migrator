@@ -5,13 +5,12 @@
    through the CSSOM (see util.js applyDynamicStyles).
 
    Light console. Design thesis: the console's colour IS the migration's status.
-   Violet is the only interactive colour; green / amber / red are reserved for
+   Teal is the only interactive colour; green / amber / red are reserved for
    what the database is actually telling you. Monospace carries data and chrome,
    the humanist sans carries language.
 
    Surface planes: white is the working plane (sidebar, topbar, cards, tables),
-   a violet-tinted light grey is the canvas behind it. Nothing is warm-neutral —
-   every grey is tinted toward the accent hue, never toward paper.
+   a cool light grey is the canvas behind it.
    ========================================================================= */
 
 :root {
@@ -19,29 +18,24 @@
      The names and roles are shadcn/ui's - background / card / muted / border /
      input / ring / primary / destructive - so any component here can be read
      straight off the shadcn recipe. The values are ours.
-
-     The one change worth naming: these greys are neutral. They used to be
-     tinted toward the violet accent, which meant every surface in the console
-     was already a third of the way to the one colour that is supposed to mean
-     "you can click this". Taking the tint out gives the accent and the four
-     status colours a surface to be loud against. */
+ */
   --background:       oklch(1 0 0);         /* the working plane: cards, chrome */
   --card:             oklch(1 0 0);
-  --canvas:           oklch(0.976 0.002 286); /* the field behind the plane */
-  --muted:            oklch(0.967 0.003 286); /* controls, tabs track, table head */
-  --muted-2:          oklch(0.930 0.004 286); /* hover */
-  --input:            oklch(0.985 0.002 286); /* form fields, before focus */
-  --border:           oklch(0.900 0.004 286);
-  --border-soft:      oklch(0.936 0.003 286);
-  --ring:             oklch(0.520 0.230 300);
+  --canvas:           oklch(0.976 0.002 215); /* the field behind the plane */
+  --muted:            oklch(0.967 0.003 215); /* controls, tabs track, table head */
+  --muted-2:          oklch(0.930 0.004 215); /* hover */
+  --input:            oklch(0.985 0.002 215); /* form fields, before focus */
+  --border:           oklch(0.900 0.004 215);
+  --border-soft:      oklch(0.936 0.003 215);
+  --ring:             oklch(0.520 0.105 205);
 
-  --foreground:       oklch(0.216 0.006 286); /* 16.4:1 on white */
-  --foreground-2:     oklch(0.432 0.008 286); /*  8.1:1 on white */
-  --muted-foreground: oklch(0.508 0.008 286); /*  5.9:1 on white, 5.1:1 on --muted */
+  --foreground:       oklch(0.216 0.006 215); /* 16.4:1 on white */
+  --foreground-2:     oklch(0.432 0.008 215); /*  8.1:1 on white */
+  --muted-foreground: oklch(0.508 0.008 215); /*  5.9:1 on white, 5.1:1 on --muted */
 
-  --primary:          oklch(0.520 0.220 300); /*  5.5:1 on white, carries white text */
-  --primary-hover:    oklch(0.430 0.205 300);
-  --primary-subtle:   oklch(0.938 0.038 300); /* active nav wash, selection */
+  --primary:          oklch(0.505 0.100 205); /*  5.5:1 on white, carries white text */
+  --primary-hover:    oklch(0.420 0.090 205);
+  --primary-subtle:   oklch(0.940 0.030 200); /* active nav wash, selection */
   --primary-foreground: oklch(0.995 0 0);
 
   /* shadcn radius scale: rounded-lg is --radius, md is -2px, sm is -4px */
@@ -53,8 +47,8 @@
   --bg-3:       var(--muted);
   --bg-4:       var(--muted-2);
   --bg-input:   var(--input);
-  --bg-code:    oklch(0.972 0.003 286);
-  --track:      oklch(0.918 0.004 286);   /* bar and progress tracks */
+  --bg-code:    oklch(0.972 0.003 215);
+  --track:      oklch(0.918 0.004 215);   /* bar and progress tracks */
   --line:       var(--border);
   --line-soft:  var(--border-soft);
 
@@ -116,8 +110,8 @@
 
   /* shadcn's two elevations and nothing in between: shadow-sm to lift a
      surface off the canvas, shadow-lg for the things that float over it. */
-  --sh-1: 0 1px 2px 0 oklch(0.216 0.006 286 / .05);
-  --sh-2: 0 10px 15px -3px oklch(0.216 0.006 286 / .10), 0 4px 6px -4px oklch(0.216 0.006 286 / .10);
+  --sh-1: 0 1px 2px 0 oklch(0.216 0.006 215 / .05);
+  --sh-2: 0 10px 15px -3px oklch(0.216 0.006 215 / .10), 0 4px 6px -4px oklch(0.216 0.006 215 / .10);
 
   /* ---- semantic stacking ------------------------------------------------- */
   --z-sticky: 10;
@@ -591,7 +585,7 @@ tbody td .hint, .legend .hint, .stat .hint { font-size: var(--t-micro); }
 .note-info > strong:first-child { color: var(--accent-hi); }
 .note ul { margin: 6px 0 0; padding-left: 18px; }
 .note li + li { margin-top: 3px; }
-.note code { background: oklch(0.30 0.03 288 / .08); padding: 0 4px; border-radius: 3px; color: inherit; }
+.note code { background: oklch(0.30 0.03 215 / .08); padding: 0 4px; border-radius: 3px; color: inherit; }
 
 /* ------------------------------------------------------------------- code */
 pre.sql {
@@ -674,7 +668,7 @@ details.step[open] .step-title { color: var(--fg); }
 /* ------------------------------------------------------------------ modal */
 .modal-backdrop {
   position: fixed; inset: 0; z-index: var(--z-backdrop);
-  background: oklch(0.26 0.03 288 / .48);
+  background: oklch(0.26 0.03 215 / .48);
   display: grid; place-items: center; padding: var(--s5);
   animation: fade .18s linear;
 }
@@ -921,3 +915,6 @@ details.stepcard.problem { border-color: var(--e-crit); }
     box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 25%, transparent);
   }
 }
+
+/* Rows that stand in for a "ดู" button: the whole row is the target. */
+tbody tr[data-job], tbody tr[data-idx] { cursor: pointer; }

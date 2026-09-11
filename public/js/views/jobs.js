@@ -4,10 +4,9 @@ import { work } from '../store.js';
 // Which job this view is showing. Seeded from the table currently open in the
 // workspace so "ดูงานเต็มหน้า" lands on the right one.
 let lastJobId = (work.current && work.byTable[work.current] && work.byTable[work.current].jobId) || null;
-import { navigate } from '../app.js';
 import {
   $, $$, esc, num, pct, bytes, duration, note, chip, toast, applyDynamicStyles,
-  confirmDialog, localTime, levelKind,
+  confirmDialog, localTime, levelKind, collapse,
 } from '../util.js';
 import { timeline, timelineLegend } from '../charts.js';
 
@@ -37,30 +36,18 @@ export async function render(host, params = {}) {
 
   host.innerHTML = `
     <div class="card">
-      <h2>งานในรอบนี้</h2>
-      <p class="hint">งานที่สร้างจากโปรเซสที่กำลังทำงานอยู่ ควบคุมได้ (หยุดชั่วคราว / ยกเลิก / rollback)</p>
-      <div id="job-list">${live.length ? jobTable(live, false) : '<div class="empty">รอบนี้ยังไม่ได้รันอะไร ไปเลือกตารางที่หน้า “ตารางที่ต้องแปลง” แล้วทำตามขั้นตอนได้เลย</div>'}</div>
-      <div class="row-tight">
-        <div class="spacer"></div>
-        <button class="btn-sm btn-ghost" id="job-goplan">→ ไปหน้าแผน &amp; รัน</button>
-        <button class="btn-sm" id="job-reload">รีเฟรชรายการ</button>
-      </div>
+      <h2>งาน</h2>
+      <div id="job-list">${all.length ? jobTable(live, archived) : '<div class="empty">ยังไม่มีงาน</div>'}</div>
+      <div class="row-tight"><div class="spacer"></div>
+        <button class="btn-sm" id="job-reload">รีเฟรช</button></div>
     </div>
 
-    ${archived.length ? `
     <div class="card">
-      <h2>งานจากการรันรอบก่อน (archive)</h2>
-      <p class="hint">อ่านจากไฟล์ manifest ใน data/jobs โปรเซสที่รันงานเหล่านี้ปิดไปแล้ว จึงสั่งควบคุมไม่ได้</p>
-      ${jobTable(archived, true)}
-    </div>` : ''}
-
-    <div class="card">
-      <h2>รายละเอียดงาน</h2>
-      <div id="job-detail">${selectedId ? '<div class="loading">กำลังโหลด…</div>' : '<div class="empty">เลือกงานเพื่อดูรายละเอียด</div>'}</div>
+      <h2>รายละเอียด</h2>
+      <div id="job-detail">${selectedId ? '<div class="loading">กำลังโหลด…</div>' : '<div class="empty">เลือกงาน</div>'}</div>
     </div>`;
 
   applyDynamicStyles(host);
-  $('#job-goplan', host).addEventListener('click', () => navigate('plan'));
   $('#job-reload', host).addEventListener('click', () => render(host, { jobId: selectedId }));
   for (const b of $$('[data-job]', host)) {
     b.addEventListener('click', () => selectJob(host, b.dataset.job));
@@ -72,42 +59,23 @@ export async function render(host, params = {}) {
 
 /* ------------------------------------------------------------------- list */
 
-function jobTable(rows, archivedTable) {
-  if (!rows.length) return '<div class="empty">ไม่มีรายการ</div>';
+function jobTable(live, archived) {
+  const rows = [...live.map((j) => [j, false]), ...archived.map((j) => [j, true])];
   return `<div class="table-wrap"><table>
-    <thead><tr>
-      <th>id</th><th>สร้างเมื่อ</th><th>สถานะ</th><th>ความคืบหน้า</th>
-      <th>เป้าหมาย</th><th>ตัวเลือก</th><th></th>
-    </tr></thead>
-    <tbody>${rows.map((j) => {
+    <thead><tr><th>id</th><th>เมื่อ</th><th>สถานะ</th><th>คืบหน้า</th></tr></thead>
+    <tbody>${rows.map(([j, arch]) => {
     const p = j.progress || {};
-    const t = j.target || {};
-    return `<tr class="${j.status === 'failed' ? 'row-crit' : j.status === 'cancelled' || j.status === 'rolled_back' ? 'row-warn' : ''}">
+    return `<tr data-job="${esc(j.id)}" class="${j.status === 'failed' ? 'row-crit' : j.status === 'cancelled' || j.status === 'rolled_back' ? 'row-warn' : ''}">
         <td class="mono">${esc(j.id)}</td>
         <td class="nowrap">${esc(localTime(j.createdAt))}</td>
-        <td class="nowrap"><span class="status-dot ${dotClass(j.status)}"></span> ${statusChip(j.status)}</td>
+        <td class="nowrap"><span class="status-dot ${dotClass(j.status)}"></span> ${statusChip(j.status)}${arch ? chip('archive', 'chip-none') : ''}</td>
         <td>
-          <div class="hint nowrap">${num(p.doneSteps)}/${num(p.totalSteps)} ขั้น${p.failedSteps ? ` · ล้ม ${num(p.failedSteps)}` : ''}</div>
+          <div class="hint nowrap">${num(p.doneSteps)}/${num(p.totalSteps)}${p.failedSteps ? ` · ล้ม ${num(p.failedSteps)}` : ''}</div>
           <div class="progress"><span data-width="${Number(p.pct) || 0}"></span></div>
-        </td>
-        <td class="mono nowrap">${esc(t.charset || '—')}<br>${esc(t.collation || '')}</td>
-        <td>${optionChips(j.options || {})}</td>
-        <td class="nowrap">
-          <button class="btn-sm" data-job="${esc(j.id)}">ดู</button>
-          ${archivedTable ? chip('archive', 'chip-none') : ''}
         </td>
       </tr>`;
   }).join('')}</tbody>
   </table></div>`;
-}
-
-function optionChips(o) {
-  return [
-    o.dryRun ? chip('dry run', 'chip-info') : '',
-    chip(`backup: ${o.backupStrategy || 'none'}`, !o.backupStrategy || o.backupStrategy === 'none' ? 'chip-warn' : 'chip-ok'),
-    o.verifyChecksum === false ? chip('ไม่ verify checksum', 'chip-bad') : chip('verify checksum', 'chip-ok'),
-    o.forced ? chip('forced', 'chip-bad') : '',
-  ].join(' ');
 }
 
 function statusChip(status) {
@@ -194,69 +162,58 @@ function detailHtml(job, entries) {
     ${banner(job)}
 
     <div class="grid grid-4">
-      <div class="stat ${job.status === 'done' ? 'ok' : job.status === 'failed' ? 'crit' : job.status === 'cancelled' || job.status === 'rolled_back' ? 'warn' : ''}">
-        <div class="k">สถานะ</div><div class="v">${esc(job.status)}</div>
-        <div class="sub">${esc(localTime(job.createdAt))}</div>
+      <div class="stat">
+        <div class="k">ขั้น</div><div class="v">${num(p.doneSteps)}/${num(p.totalSteps)}</div>
+        <div class="sub">${p.failedSteps ? `ล้ม ${num(p.failedSteps)}` : ''}</div>
       </div>
       <div class="stat">
-        <div class="k">ความคืบหน้า</div><div class="v">${num(p.doneSteps)}/${num(p.totalSteps)}</div>
-        <div class="sub">${esc(pct(p.pct))}${p.failedSteps ? ` · ล้มเหลว ${num(p.failedSteps)} ขั้น` : ''}</div>
+        <div class="k">เขียนใหม่</div><div class="v">${esc(bytes(p.doneBytes))}</div>
+        <div class="sub">/ ${esc(bytes(p.totalBytes))}</div>
       </div>
       <div class="stat">
-        <div class="k">ข้อมูลที่เขียนใหม่</div><div class="v">${esc(bytes(p.doneBytes))}</div>
-        <div class="sub">จาก ${esc(bytes(p.totalBytes))} · ${esc(pct(p.bytePct))}</div>
-      </div>
-      <div class="stat">
-        <div class="k">เวลาที่ใช้</div><div class="v">${esc(duration(elapsedMs(job)))}</div>
-        <div class="sub">${job.startedAt ? `เริ่ม ${esc(localTime(job.startedAt))}` : 'ยังไม่เริ่ม'}${job.finishedAt ? ` · จบ ${esc(localTime(job.finishedAt))}` : ''}</div>
+        <div class="k">เวลา</div><div class="v">${esc(duration(elapsedMs(job)))}</div>
+        <div class="sub">${esc(localTime(job.startedAt))}</div>
       </div>
     </div>
 
     <div class="progress-wrap">
       <span class="status-dot ${dotClass(job.status)}"></span>
       <div class="progress"><span data-width="${Number(p.pct) || 0}"></span></div>
-      <span class="hint nowrap">${esc(pct(p.pct))} · ${num(p.doneSteps)}/${num(p.totalSteps)} ขั้น</span>
+      <span class="hint nowrap">${esc(pct(p.pct))}</span>
     </div>
 
     ${stepTimeline(steps)}
 
-    ${job.throttle ? note('warn', 'ตัวรันกำลังรอให้โหลดของเซิร์ฟเวอร์ลดลง', `
-      ยังไม่เริ่ม rebuild ขั้นถัดไปจนกว่าเซิร์ฟเวอร์จะว่างพอ (ป้องกันการทำ production ช้า)
-      <code>Threads_running = ${num(job.throttle.threadsRunning)}</code>
-      · replica lag = <code>${job.throttle.lagSec === null || job.throttle.lagSec === undefined ? 'ไม่มี replica' : `${num(job.throttle.lagSec)} วินาที`}</code>
-      · รอมาแล้ว ${esc(duration(Date.now() - Number(job.throttle.since || Date.now())))}`) : ''}
+    ${job.throttle ? note('warn', 'รอโหลดเซิร์ฟเวอร์ลดลง', `
+      <code>Threads_running ${num(job.throttle.threadsRunning)}</code>
+      · lag ${job.throttle.lagSec === null || job.throttle.lagSec === undefined ? '—' : `${num(job.throttle.lagSec)}s`}
+      · รอมา ${esc(duration(Date.now() - Number(job.throttle.since || Date.now())))}`) : ''}
 
     ${isArchived
-    ? note('info', 'งานย้อนหลัง', 'งานนี้รันจากรอบก่อนที่ปิดไปแล้ว ดูย้อนหลังได้อย่างเดียว สั่งหยุดหรือย้อนกลับไม่ได้ ถ้าจะย้อนจริงๆ ให้ใช้ SQL rollback ของแต่ละขั้นด้านล่าง')
+    ? note('info', 'งานจากรอบก่อน', 'ดูได้อย่างเดียว สั่งงานไม่ได้ ถ้าต้องย้อนให้ใช้ SQL rollback ในแต่ละขั้น')
     : `<div class="row-tight">
-        <button class="btn-sm" id="job-pause" ${isLive && job.status !== 'rolling_back' ? '' : 'disabled'}>${job.paused ? '▶ ทำต่อ' : '⏸ หยุดชั่วคราว'}</button>
-        <button class="btn-sm btn-danger" id="job-cancel" ${isLive && job.status !== 'rolling_back' ? '' : 'disabled'}>✕ ยกเลิกงาน</button>
+        <button class="btn-sm" id="job-pause" ${isLive && job.status !== 'rolling_back' ? '' : 'disabled'}>${job.paused ? '▶ ทำต่อ' : '⏸ พัก'}</button>
+        <button class="btn-sm btn-danger" id="job-cancel" ${isLive && job.status !== 'rolling_back' ? '' : 'disabled'}>✕ ยกเลิก</button>
         <div class="spacer"></div>
-        <span class="hint">${isLive ? 'rollback ทำได้เมื่องานหยุดแล้ว' : 'rollback จะย้อนทุกขั้นที่สำเร็จ จากขั้นล่าสุดไปหาขั้นแรก'}</span>
         <button class="btn-sm btn-danger" id="job-rollback" ${isLive ? 'disabled' : ''}>↩ Rollback ทั้งงาน…</button>
       </div>`}
 
-    <h4>ตัวเลือกและที่มาของงานนี้</h4>
-    <div class="kv">
+    ${collapse('ตัวเลือก', `<div class="kv">
       <dt>target</dt><dd>${esc(t.charset)} / ${esc(t.collation)}</dd>
-      <dt>preflight</dt><dd>${esc(job.preflightId || '— (ไม่ได้ผูก preflight)')}</dd>
+      <dt>preflight</dt><dd>${esc(job.preflightId || '—')}</dd>
       <dt>snapshot</dt><dd>${esc(job.snapshotId || '—')}</dd>
       <dt>connection</dt><dd>${esc((job.connection || {}).user)}@${esc((job.connection || {}).host)}:${esc((job.connection || {}).port)} · ${esc((job.connection || {}).server || '?')}</dd>
       ${Object.entries(o).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(fmtVal(v))}</dd>`).join('')}
-    </div>
+    </div>`)}
 
     <h4>ขั้นการทำงาน (${num(steps.length)})</h4>
     ${steps.length
     ? steps.map((s, i) => stepHtml(job, s, i, isArchived, isLive)).join('')
-    : '<div class="empty">manifest นี้ไม่มีรายละเอียดขั้นการทำงาน</div>'}
+    : '<div class="empty">ไม่มีรายละเอียดขั้น</div>'}
 
-    <h4>Log ของงาน (${num(entries.length)} รายการ)</h4>
-    <div class="row-tight">
-      <label class="check"><input type="checkbox" id="job-log-follow" ${followLog ? 'checked' : ''}> ติดตามอัตโนมัติ</label>
-      <div class="spacer"></div>
-      <span class="hint">เขียนแบบ NDJSON ที่ data/jobs/${esc(job.id)}.ndjson เรียงเก่า→ใหม่</span>
-    </div>
-    ${logPanel(entries)}`;
+    ${collapse(`Log (${num(entries.length)})`, `
+      <label class="check"><input type="checkbox" id="job-log-follow" ${followLog ? 'checked' : ''}> ตามอัตโนมัติ</label>
+      ${logPanel(entries)}`)}`;
 }
 
 /**
@@ -288,7 +245,7 @@ function stepTimeline(steps) {
     .filter((r) => r.segments.some((s) => s.ms > 0));
 
   if (!rows.length) return '';
-  return `<h4>เวลาที่ใช้จริงในแต่ละขั้น</h4>
+  return `<h4>เวลาที่ใช้ในแต่ละขั้น</h4>
     ${timeline(rows)}
     ${timelineLegend([
     { kind: 'backup', label: 'สำรองข้อมูล' },
@@ -302,8 +259,8 @@ function banner(job) {
   const p = job.progress || {};
   if (job.status === 'done') {
     return p.failedSteps
-      ? note('warn', `งานจบแล้ว แต่มี ${num(p.failedSteps)} ขั้นที่ล้มเหลว`, 'ตรวจแต่ละขั้นด้านล่าง และพิจารณา rollback เฉพาะขั้นที่มีปัญหา')
-      : note('ok', 'เสร็จเรียบร้อย', `รันครบ ${num(p.doneSteps)} ขั้น ไม่มีขั้นไหนล้มเหลว`);
+      ? note('warn', `จบแล้ว แต่ล้ม ${num(p.failedSteps)} ขั้น`, 'ตรวจแต่ละขั้นด้านล่าง แล้ว rollback เฉพาะขั้นที่มีปัญหา')
+      : note('ok', 'เสร็จเรียบร้อย', `${num(p.doneSteps)} ขั้น`);
   }
   if (job.status === 'failed') {
     return note('crit', 'งานล้มเหลว', `<ul>
@@ -312,11 +269,10 @@ function banner(job) {
     </ul>`);
   }
   if (job.status === 'cancelled') {
-    return note('warn', 'ยกเลิกโดยผู้ใช้', 'ขั้นที่รันไปแล้วยังเป็นสภาพหลังแปลงอยู่ ถ้าจะเอากลับเป็นแบบเดิมให้กด Rollback');
+    return note('warn', 'ยกเลิกแล้ว', 'ขั้นที่รันไปแล้วยังอยู่ในสภาพหลังแปลง กด Rollback ถ้าต้องคืนสภาพ');
   }
   if (job.status === 'rolled_back') {
-    return note('warn', 'ย้อนกลับแล้ว (rolled back)', `ขั้นที่ย้อนกลับถูกคืนสภาพตาม method ที่ระบุในแต่ละขั้น
-      ${job.rollbackError ? `<br><strong>มีข้อผิดพลาดระหว่าง rollback:</strong> ${esc(job.rollbackError)}` : ''}`);
+    return note('warn', 'ย้อนกลับแล้ว', `${job.rollbackError ? `<strong>มี error ระหว่าง rollback:</strong> ${esc(job.rollbackError)}` : 'คืนสภาพตาม method ของแต่ละขั้น'}`);
   }
   return '';
 }
@@ -346,6 +302,8 @@ function stepHtml(job, s, i, isArchived, isLive) {
         <span class="chip ${s.metadataOnly ? 'chip-info' : ''}">${esc(s.kind)}</span>
         <span class="step-title">${i + 1}. ${esc(s.title)}</span>
         ${s.verify ? (s.verify.ok ? chip('checksum ตรง', 'chip-ok') : chip('checksum ไม่ตรง', 'chip-bad')) : ''}
+        ${s.status === 'backing_up' && s.backupProgress
+    ? chip(`สำรองแล้ว ${num(s.backupProgress.rows)} แถว`, 'chip-info') : ''}
         ${s.alterDurationMs ? chip(duration(s.alterDurationMs)) : ''}
         ${s.estimate ? chip(bytes(s.estimate.bytes)) : ''}
       </summary>
@@ -359,22 +317,20 @@ function stepHtml(job, s, i, isArchived, isLive) {
         <div class="kv">
           <dt>ตาราง</dt><dd>${esc(s.schemaName)}${s.tableName ? `.${esc(s.tableName)}` : ''}</dd>
           <dt>เริ่ม / จบ</dt><dd>${esc(localTime(s.startedAt))} → ${esc(localTime(s.finishedAt))}</dd>
-          <dt>เวลา ALTER</dt><dd>${esc(duration(s.alterDurationMs))}</dd>
-          <dt>ประมาณการ</dt><dd>${s.estimate ? `${num(s.estimate.rows)} แถว · ${esc(bytes(s.estimate.bytes))} · rebuild: ${s.estimate.rebuild ? 'ใช่' : 'ไม่'}` : '—'}</dd>
-          ${s.throttle ? `<dt>รอโหลดลด</dt><dd>${s.throttle.skipped ? 'ข้ามการรอ (ignoreLoad)' : `${esc(duration(s.throttle.waitedMs))} · Threads_running ${num(s.throttle.threadsRunning)}`}</dd>` : ''}
+          <dt>ALTER</dt><dd>${esc(duration(s.alterDurationMs))}</dd>
+          <dt>ประมาณการ</dt><dd>${s.estimate ? `${num(s.estimate.rows)} แถว · ${esc(bytes(s.estimate.bytes))}${s.estimate.rebuild ? ' · rebuild' : ''}` : '—'}</dd>
+          ${s.throttle ? `<dt>รอโหลด</dt><dd>${s.throttle.skipped ? 'ข้าม (ignoreLoad)' : `${esc(duration(s.throttle.waitedMs))} · Threads_running ${num(s.throttle.threadsRunning)}`}</dd>` : ''}
         </div>
 
         <div class="row-tight"><strong class="hint">FORWARD</strong></div>
         <pre class="sql">${esc(s.sql)}</pre>
-        <div class="row-tight"><strong class="hint">ROLLBACK (เตรียมไว้ก่อนรัน)</strong></div>
+        <div class="row-tight"><strong class="hint">ROLLBACK</strong></div>
         <pre class="sql rollback">${esc((s.rollbackSql || []).join('\n'))}</pre>
 
         ${backupBlock(s)}
         ${metaVerifyBlock(s)}
         ${rollbackBlock(s)}
-        ${s.createTableBefore ? `
-          <div class="row-tight"><strong class="hint">SHOW CREATE TABLE ก่อนรัน</strong></div>
-          <pre class="sql small">${esc(s.createTableBefore)}</pre>` : ''}
+        ${s.createTableBefore ? collapse('SHOW CREATE TABLE ก่อนรัน', `<pre class="sql small">${esc(s.createTableBefore)}</pre>`) : ''}
 
         ${canRollback ? `<div class="row-tight">
           <div class="spacer"></div>
@@ -390,10 +346,10 @@ function verifyBlock(s) {
   if (!b && !a && !s.verify) return '';
   const verdict = s.verify
     ? (s.verify.ok
-      ? note('ok', 'ยืนยันแล้ว: ข้อมูลไม่เปลี่ยน', 'ค่าและจำนวนแถวหลังแปลง ตรงกับก่อนแปลงทุกตัว (แปลงเป็น utf8mb4 ก่อน hash เลยไม่ขึ้นกับ encoding)')
-      : note('crit', 'checksum ไม่ตรงกันหลังแปลง ข้อมูลเปลี่ยน', `<ul>${(s.verify.issues || []).map((x) => `<li>${esc(x)}</li>`).join('')}</ul>
+      ? note('ok', 'ข้อมูลไม่เปลี่ยน', 'checksum และจำนวนแถวตรงกับก่อนแปลง')
+      : note('crit', 'checksum ไม่ตรง ข้อมูลเปลี่ยน', `<ul>${(s.verify.issues || []).map((x) => `<li>${esc(x)}</li>`).join('')}</ul>
           ${(s.verify.changedColumns || []).length ? `คอลัมน์ที่ข้อมูลเปลี่ยน: <code>${esc(s.verify.changedColumns.join(', '))}</code>` : ''}`))
-    : note('info', 'ไม่มีผลเทียบ checksum', 'ขั้นนี้ไม่ได้เทียบ checksum เพราะเป็น metadata อย่างเดียว หรือเป็นการลองรัน หรือปิดการเทียบไว้');
+    : note('info', 'ไม่ได้เทียบ checksum', 'metadata อย่างเดียว / dry run / ปิดการเทียบไว้');
   return `${verdict}
     <div class="kv">
       <dt>โหมด</dt><dd>${esc((b && b.mode) || (a && a.mode) || '—')}</dd>
@@ -411,19 +367,41 @@ function metaVerifyBlock(s) {
   const body = `<div class="kv">${Object.entries(obs).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(fmtVal(v))}</dd>`).join('')}</div>`;
   return s.metaVerify.ok
     ? note('ok', 'metadata ตรงเป้าหมาย', body)
-    : note('warn', 'metadata ยังไม่ตรงเป้าหมายทั้งหมด', `อาจมีคอลัมน์ที่ตั้ง charset ไว้เฉพาะตัว หรือ table collation ไม่ถูกเปลี่ยน${body}`);
+    : note('warn', 'metadata ยังไม่ตรงทั้งหมด', `อาจมีคอลัมน์ที่ตั้ง charset เฉพาะตัว หรือ table collation ไม่ถูกเปลี่ยน${body}`);
+}
+
+/**
+ * A running copy used to look exactly like a hung one. The chunked load
+ * reports after every chunk, so while the step says `backing_up` there is a
+ * row count that moves.
+ */
+function backupProgressBlock(s) {
+  const p = s.backupProgress;
+  if (!p || s.status !== 'backing_up') return '';
+  return `<div class="progress-wrap">
+    <span class="status-dot running"></span>
+    <div class="progress"><span data-width="${Number(p.pct) || 0}"></span></div>
+    <span class="hint nowrap">สำรองแล้ว ${num(p.rows)}${p.approxRows ? ` / ~${num(p.approxRows)}` : ''} แถว</span>
+  </div>`;
 }
 
 function backupBlock(s) {
   const b = s.backup;
-  if (!b) return '';
+  if (!b) return backupProgressBlock(s);
+  const counted = b.sourceRowsExact === true;
   return note('info', `backup ก่อนรัน (${b.kind})`, `<div class="kv">
     ${b.backupTable ? `<dt>ตารางสำรอง</dt><dd>${esc(b.backupTable)}</dd>` : ''}
     ${b.file ? `<dt>ไฟล์</dt><dd>${esc(b.file)}</dd>` : ''}
     ${b.rows === undefined ? '' : `<dt>แถวที่สำรอง</dt><dd>${num(b.rows)}</dd>`}
+    ${b.sourceRows === undefined || b.sourceRows === null ? '' : `<dt>แถวต้นทาง</dt><dd>${num(b.sourceRows)}${counted ? '' : ' (ประมาณ)'}</dd>`}
+    ${b.chunked === undefined ? '' : `<dt>วิธีคัดลอก</dt><dd>${b.chunked
+    ? `${num(b.chunks)} ชุด × ${num(b.chunkRows)} แถว (ตาม primary key)`
+    : 'คำสั่งเดียว (ไม่มี primary key จึงยกเลิกกลางทางไม่ได้)'}</dd>`}
+    ${(b.deferredIndexes || []).length ? `<dt>index ที่สร้างทีหลัง</dt><dd>${esc(b.deferredIndexes.join(', '))}</dd>` : ''}
     ${b.sizeBytes === undefined ? '' : `<dt>ขนาด</dt><dd>${esc(bytes(b.sizeBytes))}</dd>`}
     ${(b.restoreSql || []).length ? `<dt>คำสั่งคืนค่า</dt><dd>${esc(b.restoreSql.join(' '))}</dd>` : ''}
-  </div>`);
+  </div>
+  ${b.consistent === false ? note('warn', 'จำนวนแถวไม่ตรงกัน', 'ตารางสำรองมีแถวไม่เท่าต้นทาง น่าจะมี write เข้ามาระหว่างคัดลอก') : ''}`);
 }
 
 function rollbackBlock(s) {
@@ -431,11 +409,11 @@ function rollbackBlock(s) {
   if (!r) return '';
   const verdict = r.verify
     ? (r.verify.ok
-      ? note('ok', 'rollback ยืนยันแล้ว', 'ค่าหลัง rollback ตรงกับตอนก่อนแปลง ข้อมูลกลับมาเหมือนเดิมแล้ว')
-      : note('crit', 'rollback แล้วข้อมูลยังไม่ตรงกับก่อนแปลง', `<ul>${(r.verify.issues || []).map((x) => `<li>${esc(x)}</li>`).join('')}</ul>`))
+      ? note('ok', 'rollback ยืนยันแล้ว', 'ข้อมูลตรงกับก่อนแปลง')
+      : note('crit', 'rollback แล้วข้อมูลยังไม่ตรง', `<ul>${(r.verify.issues || []).map((x) => `<li>${esc(x)}</li>`).join('')}</ul>`))
     : '';
   return `
-    <div class="row-tight"><strong class="hint">ROLLBACK ที่ทำไปแล้ว</strong>${chip(r.status || '—', r.status === 'done' ? 'chip-ok' : r.status === 'failed' || r.status === 'verify_failed' ? 'chip-bad' : 'chip-info')}${r.method ? chip(r.method, 'chip-info') : ''}</div>
+    <div class="row-tight"><strong class="hint">ROLLBACK ที่ทำแล้ว</strong>${chip(r.status || '—', r.status === 'done' ? 'chip-ok' : r.status === 'failed' || r.status === 'verify_failed' ? 'chip-bad' : 'chip-info')}${r.method ? chip(r.method, 'chip-info') : ''}</div>
     ${r.error ? note('crit', 'rollback ล้มเหลว', esc(r.error)) : ''}
     ${r.note ? note('warn', 'ข้อจำกัดของ rollback นี้', esc(r.note)) : ''}
     ${verdict}
@@ -450,7 +428,7 @@ function rollbackBlock(s) {
 /* -------------------------------------------------------------------- log */
 
 function logPanel(entries) {
-  if (!entries.length) return '<div class="empty">ยังไม่มี log ของงานนี้</div>';
+  if (!entries.length) return '<div class="empty">ยังไม่มี log</div>';
   return `<div class="table-wrap" id="job-log-wrap"><table>
     <thead><tr><th>เวลา</th><th>event</th><th>รายละเอียด</th></tr></thead>
     <tbody>${entries.map((e) => {
