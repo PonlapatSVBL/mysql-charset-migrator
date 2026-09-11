@@ -270,6 +270,7 @@ sessionId เป็น opaque handle 24 bytes base64url ส่งกลับไ
 - เรียงได้ตาม schema / table / column / ordinal / type / charset / collation / tableCollation / rows / size / engine (whitelist `SORTABLE`)
 - แบ่งหน้า `pageSize` 1–1000 (default 100)
 - **CSV export** — `GET /api/inventory.csv` ใช้ฟิลเตอร์ชุดเดียวกันโดยไม่แบ่งหน้า (cap 200,000 แถว) เขียน 23 คอลัมน์ นำหน้าด้วย UTF-8 BOM (`\uFEFF`) เพื่อให้ Excel อ่านภาษาไทยถูก ดาวน์โหลดฝั่ง client ทำผ่าน blob เพราะต้องแนบ boot key ใน header
+- **Excel export ของ work list** — `GET /api/export/tables.xlsx` (ปุ่มอยู่หน้า "ตารางที่ต้องแปลง") ส่งทุกแถวที่ตรงฟิลเตอร์ปัจจุบัน ไม่ใช่เฉพาะหน้าที่เปิดอยู่ ตั้งต้นที่ `status=todo` คือตารางที่ยังไม่เป็น target charset/collation — ไฟล์เขียนเองใน `server/lib/xlsx.js` (zip + XML บน `zlib` ที่มากับ Node ไม่เพิ่ม dependency) ตรึงหัวตาราง + autofilter เลือก `.xlsx` แทน CSV เพราะ Excel บน Windows locale ไทยเดา encoding ของ CSV ผิดบ่อยจนรายงานเรื่อง charset กลายเป็น mojibake เสียเอง cap 100k แถว เกินแล้วตอบ 413 ให้กรองให้แคบลง
 
 #### 4.1 Preflight — ตรวจข้อมูลก่อนแปลง
 
@@ -535,7 +536,7 @@ flag ของ mysqldump ที่ใช้: `--single-transaction --quick --hex
 - `GET /api/jobs/:id/log` อ่าน NDJSON ของ job (สูงสุด 3,000 บรรทัดล่าสุด default)
 - ทุกบรรทัดผ่าน redaction เดียวกันตอนเขียน — log ที่แสดงจึงไม่มีรหัสผ่านอยู่แล้วโดยโครงสร้าง
 
-**Audit events ที่มี**: `server.start`, `server.stop`, `process.unhandledRejection`, `process.uncaughtException`, `session.connect`, `session.connect.failed`, `session.disconnect`, `session.credential.reveal`, `inventory.export`, `preflight.start|done|failed`, `checksum.start|done|failed`, `plan.created`, `job.created`, `api.error` และ job events: `job.start`, `job.finish`, `job.error`, `job.cancel.requested`, `job.pause`, `job.resume`, `step.start`, `step.backup.start|done`, `step.checksum.before|after`, `step.warnings`, `step.done`, `step.failed`, `step.meta.mismatch`, `throttle.wait`, `guard.failed`, `rollback.step.start|done|failed`, `rollback.job.start|finish`
+**Audit events ที่มี**: `server.start`, `server.stop`, `process.unhandledRejection`, `process.uncaughtException`, `session.connect`, `session.connect.failed`, `session.disconnect`, `session.credential.reveal`, `inventory.export`, `tables.export`, `preflight.start|done|failed`, `checksum.start|done|failed`, `plan.created`, `job.created`, `api.error` และ job events: `job.start`, `job.finish`, `job.error`, `job.cancel.requested`, `job.pause`, `job.resume`, `step.start`, `step.backup.start|done`, `step.checksum.before|after`, `step.warnings`, `step.done`, `step.failed`, `step.meta.mismatch`, `throttle.wait`, `guard.failed`, `rollback.step.start|done|failed`, `rollback.job.start|finish`
 
 ---
 
@@ -557,6 +558,7 @@ flag ของ mysqldump ที่ใช้: `--single-transaction --quick --hex
 | `GET` | `/api/inventory` | ตาราง column แบบแบ่งหน้า + ฟิลเตอร์ + เรียง |
 | `GET` | `/api/inventory.csv` | export CSV (UTF-8 BOM) ใช้ฟิลเตอร์เดียวกัน ไม่แบ่งหน้า cap 200k แถว |
 | `GET` | `/api/tables` | **work list** — 1 แถวต่อตาราง + สถานะ (`rebuild` / `metadata_only` / `compliant`) + ยอดรวมต่อสถานะ |
+| `GET` | `/api/export/tables.xlsx` | work list เป็นไฟล์ Excel ใช้ฟิลเตอร์เดียวกัน ไม่แบ่งหน้า ตั้งต้น `status=todo` (cap 100k แถว เกินแล้วตอบ 413) |
 | `GET` | `/api/tables/:schema/:table` | ทุกอย่างที่หน้าทำงานต่อตารางต้องใช้: metadata, คอลัมน์ที่ต้องเปลี่ยน, `scanPlan`, `checksumPlan` |
 | `POST` | `/api/preflight` | เริ่ม preflight scan (async) → **HTTP 202** + task view |
 | `GET` | `/api/preflight` | รายการ task ที่รันอยู่ + ผลที่เก็บไว้ใน `data/snapshots` |

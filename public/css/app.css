@@ -15,28 +15,60 @@
    ========================================================================= */
 
 :root {
-  /* ---- surface ramp: violet-tinted light neutrals ------------------------ */
-  --bg:         oklch(0.962 0.006 288);   /* canvas behind the working plane */
-  --bg-2:       oklch(1 0 0);             /* the working plane: cards, chrome */
-  --bg-3:       oklch(0.948 0.008 288);   /* controls, chips, table headers   */
-  --bg-4:       oklch(0.905 0.012 288);   /* hover                            */
-  --bg-input:   oklch(0.978 0.006 288);   /* form fields, before focus        */
-  --bg-code:    oklch(0.972 0.010 288);
-  --track:      oklch(0.902 0.012 288);   /* bar and progress tracks          */
-  --line:       oklch(0.855 0.012 288);
-  --line-soft:  oklch(0.915 0.010 288);
+  /* ---- shadcn token layer ------------------------------------------------
+     The names and roles are shadcn/ui's - background / card / muted / border /
+     input / ring / primary / destructive - so any component here can be read
+     straight off the shadcn recipe. The values are ours.
+
+     The one change worth naming: these greys are neutral. They used to be
+     tinted toward the violet accent, which meant every surface in the console
+     was already a third of the way to the one colour that is supposed to mean
+     "you can click this". Taking the tint out gives the accent and the four
+     status colours a surface to be loud against. */
+  --background:       oklch(1 0 0);         /* the working plane: cards, chrome */
+  --card:             oklch(1 0 0);
+  --canvas:           oklch(0.976 0.002 286); /* the field behind the plane */
+  --muted:            oklch(0.967 0.003 286); /* controls, tabs track, table head */
+  --muted-2:          oklch(0.930 0.004 286); /* hover */
+  --input:            oklch(0.985 0.002 286); /* form fields, before focus */
+  --border:           oklch(0.900 0.004 286);
+  --border-soft:      oklch(0.936 0.003 286);
+  --ring:             oklch(0.520 0.230 300);
+
+  --foreground:       oklch(0.216 0.006 286); /* 16.4:1 on white */
+  --foreground-2:     oklch(0.432 0.008 286); /*  8.1:1 on white */
+  --muted-foreground: oklch(0.508 0.008 286); /*  5.9:1 on white, 5.1:1 on --muted */
+
+  --primary:          oklch(0.520 0.220 300); /*  5.5:1 on white, carries white text */
+  --primary-hover:    oklch(0.430 0.205 300);
+  --primary-subtle:   oklch(0.938 0.038 300); /* active nav wash, selection */
+  --primary-foreground: oklch(0.995 0 0);
+
+  /* shadcn radius scale: rounded-lg is --radius, md is -2px, sm is -4px */
+  --radius:     8px;
+
+  /* ---- surface ramp (legacy names, one source of truth above) ------------ */
+  --bg:         var(--canvas);
+  --bg-2:       var(--background);
+  --bg-3:       var(--muted);
+  --bg-4:       var(--muted-2);
+  --bg-input:   var(--input);
+  --bg-code:    oklch(0.972 0.003 286);
+  --track:      oklch(0.918 0.004 286);   /* bar and progress tracks */
+  --line:       var(--border);
+  --line-soft:  var(--border-soft);
 
   /* ---- ink -------------------------------------------------------------- */
-  --fg:         oklch(0.255 0.020 288);   /* 15.8:1 on white  */
-  --fg-dim:     oklch(0.430 0.018 288);   /*  8.1:1 on white  */
-  --fg-mute:    oklch(0.505 0.016 288);   /*  5.9:1 on white, 5.0:1 on --bg-3 */
+  --fg:         var(--foreground);
+  --fg-dim:     var(--foreground-2);
+  --fg-mute:    var(--muted-foreground);
 
   /* ---- the one interactive colour --------------------------------------- */
-  --accent:     oklch(0.520 0.220 300);   /*  5.5:1 on white, carries white text */
-  --accent-hi:  oklch(0.430 0.205 300);   /* hover / links go darker on light */
-  --accent-dim: oklch(0.935 0.040 300);   /* active nav wash, selection       */
-  --accent-ink: oklch(0.995 0 0);         /* text on an accent fill           */
-  --focus:      oklch(0.500 0.230 300);
+  --accent:     var(--primary);
+  --accent-hi:  var(--primary-hover);
+  --accent-dim: var(--primary-subtle);
+  --accent-ink: var(--primary-foreground);
+  --focus:      var(--ring);
 
   /* ---- status: reserved for what the database reports --------------------
      Two ramps: the saturated one marks (dots, bars, rules, chart segments),
@@ -80,11 +112,12 @@
 
   /* ---- rhythm ------------------------------------------------------------ */
   --s1: 4px;  --s2: 8px;  --s3: 12px; --s4: 16px; --s5: 22px; --s6: 30px;
-  --r-sm: 6px; --r-md: 9px; --r-lg: 13px;
+  --r-sm: calc(var(--radius) - 4px); --r-md: calc(var(--radius) - 2px); --r-lg: var(--radius);
 
-  /* light-theme shadows are structure, not drama */
-  --sh-1: 0 1px 2px oklch(0.30 0.04 288 / .05);
-  --sh-2: 0 16px 40px oklch(0.30 0.04 288 / .16), 0 2px 8px oklch(0.30 0.04 288 / .09);
+  /* shadcn's two elevations and nothing in between: shadow-sm to lift a
+     surface off the canvas, shadow-lg for the things that float over it. */
+  --sh-1: 0 1px 2px 0 oklch(0.216 0.006 286 / .05);
+  --sh-2: 0 10px 15px -3px oklch(0.216 0.006 286 / .10), 0 4px 6px -4px oklch(0.216 0.006 286 / .10);
 
   /* ---- semantic stacking ------------------------------------------------- */
   --z-sticky: 10;
@@ -245,31 +278,36 @@ button, select, input, textarea {
 }
 input, select, textarea { background: var(--bg-input); }
 input::placeholder, textarea::placeholder { color: var(--fg-mute); opacity: 1; }
-input:hover, select:hover, textarea:hover { border-color: var(--fg-mute); }
-:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+input:hover, select:hover, textarea:hover { border-color: var(--muted-foreground); }
+/* shadcn's focus ring: 2px in the ring colour, held 2px off the control so it
+   reads on a filled button and an outlined input alike. */
+:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 input:focus, select:focus, textarea:focus {
-  outline: 2px solid var(--focus); outline-offset: 1px;
-  border-color: var(--accent); background: var(--bg-2);
+  outline: 2px solid var(--ring); outline-offset: 2px;
+  border-color: var(--ring); background: var(--bg-2);
 }
 textarea { font-family: var(--mono); font-size: var(--t-mini); resize: vertical; }
 select[multiple] { min-height: 116px; font-family: var(--mono); font-size: var(--t-mini); padding: var(--s1); }
 select[multiple] option { padding: 3px 6px; border-radius: 3px; }
 
+/* shadcn button variants: the base is `secondary`, and hover shifts the fill
+   rather than the border - a border that darkens on hover reads as the control
+   changing shape, which is noise on a page holding forty of them. */
 button {
-  cursor: pointer; font-weight: 550;
+  cursor: pointer; font-weight: 500;
   transition: background .12s var(--e-quart), border-color .12s var(--e-quart), color .12s var(--e-quart);
 }
-button:hover:not([disabled]) { background: var(--bg-4); border-color: var(--fg-mute); }
+button:hover:not([disabled]) { background: var(--bg-4); }
 /* Pressed state: without it every button in the app feels unresponsive on the
    click itself, which is the moment the user is asking for confirmation. */
 button:active:not([disabled]) { transform: translateY(1px); }
-button[disabled] { opacity: .45; cursor: not-allowed; }
-.btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 650; }
-.btn-primary:hover:not([disabled]) { background: var(--accent-hi); border-color: var(--accent-hi); }
-.btn-danger { background: var(--f-crit); border-color: var(--e-crit); color: var(--crit-t); }
+button[disabled] { opacity: .5; cursor: not-allowed; }
+.btn-primary { background: var(--primary); border-color: var(--primary); color: var(--primary-foreground); font-weight: 600; }
+.btn-primary:hover:not([disabled]) { background: var(--primary-hover); border-color: var(--primary-hover); }
+.btn-danger { background: var(--f-crit); border-color: var(--e-crit); color: var(--crit-t); font-weight: 600; }
 .btn-danger:hover:not([disabled]) { background: color-mix(in oklab, var(--crit) 22%, var(--bg-2)); border-color: var(--crit); }
 .btn-ghost { background: transparent; border-color: var(--line); color: var(--fg-dim); }
-.btn-ghost:hover:not([disabled]) { background: var(--bg-3); border-color: var(--fg-mute); color: var(--fg); }
+.btn-ghost:hover:not([disabled]) { background: var(--bg-3); color: var(--fg); }
 .btn-sm { padding: 4px var(--s2); font-size: var(--t-mini); }
 
 label.field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
@@ -297,7 +335,7 @@ label.check input { width: auto; accent-color: var(--accent); }
 
 /* ------------------------------------------------------------------ cards */
 .card {
-  background: var(--bg-2); border: 1px solid var(--line-soft); border-radius: var(--r-lg);
+  background: var(--card); border: 1px solid var(--line-soft); border-radius: var(--r-lg);
   box-shadow: var(--sh-1);
   padding: var(--s4) var(--s5) var(--s5);
   margin-bottom: var(--s4);
@@ -349,9 +387,12 @@ label.check input { width: auto; accent-color: var(--accent); }
   line-height: 1.05; overflow-wrap: anywhere;
 }
 .stat .sub { font-size: var(--t-mini); color: var(--fg-dim); line-height: 1.5; }
-.stat.ok   { border-color: var(--e-ok);   border-top-color: var(--ok);   background: var(--f-ok); }
-.stat.warn { border-color: var(--e-warn); border-top-color: var(--warn); background: var(--f-warn); }
-.stat.crit { border-color: var(--e-crit); border-top-color: var(--crit); background: var(--f-crit); }
+/* One status signal per tile, not three. The top rule and the value carry it;
+   the field stays white, so a row of four tiles reads as one surface with a
+   coloured edge rather than four differently-tinted cards. */
+.stat.ok   { border-color: var(--e-ok);   border-top-color: var(--ok); }
+.stat.warn { border-color: var(--e-warn); border-top-color: var(--warn); }
+.stat.crit { border-color: var(--e-crit); border-top-color: var(--crit); }
 .stat.ok .v   { color: var(--ok-t); }
 .stat.warn .v { color: var(--warn-t); }
 .stat.crit .v { color: var(--crit-t); }
@@ -366,41 +407,114 @@ label.check input { width: auto; accent-color: var(--accent); }
 .bar.warn > span { background: var(--warn); }
 .bar.crit > span { background: var(--crit); }
 
-/* Progress readout. Two of these stack, and because the bars share a left
-   edge and a scale, "columns vs tables" is a glance rather than a comparison
-   of two circles. */
-.progress-rows { display: flex; flex-direction: column; gap: var(--s4); }
-.prow-head { display: flex; align-items: baseline; gap: var(--s2); margin-bottom: 6px; }
-.prow-name { font-size: var(--t-body); font-weight: 600; }
-.prow-pct {
-  margin-left: auto; font-family: var(--mono); font-size: var(--t-stat);
-  font-weight: 620; letter-spacing: -.03em; font-variant-numeric: tabular-nums;
-  line-height: 1;
-}
-.prow-bar { height: 8px; border-radius: 999px; background: var(--track); overflow: hidden; }
-/* Accent while there is work left, green only when there is none: green has
-   one job in this app and it is "done", not "some of it". */
-.prow-bar > span { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
-.prow-bar > span.complete { background: var(--ok); }
-.prow-foot {
-  display: flex; gap: var(--s4); margin-top: 6px;
-  font-size: var(--t-small); color: var(--fg-mute);
-}
-.prow-foot b { font-family: var(--mono); font-weight: 600; color: var(--fg-dim); }
+/* =========================================================================
+   Charts (public/js/charts.js)
 
-.legend { display: flex; flex-direction: column; gap: 5px; font-size: var(--t-small); min-width: 0; flex: 1; }
-.legend-row { display: grid; grid-template-columns: 10px 1fr auto auto; gap: var(--s2); align-items: center; }
-.legend-dot { width: 8px; height: 8px; border-radius: 2px; }
-.legend-name {
-  font-family: var(--mono); font-size: var(--t-mini); color: var(--fg-dim);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+   Every chart is inline SVG whose colours live here as classes, because the
+   page forbids inline styles. Two rules hold across all of them:
+     - green means "done", never "some of it". The accent carries work that is
+       still outstanding, which is the thing the operator is here to move.
+     - area and length mean bytes wherever bytes are what the ALTER has to
+       rewrite. Nothing in these charts is scaled by table count.
+   ========================================================================= */
+.chart { display: block; width: 100%; height: auto; overflow: visible; }
+/* Text inside an SVG scales with the box, so both ends have to be pinned: a
+   max-width stops the type growing on a wide monitor, a min-width plus a
+   scroll stops it collapsing on a phone. Charts without text (the donut, the
+   in-table mini bars) size themselves and never come through here. */
+.chart-scroll { overflow-x: auto; overflow-y: hidden; max-width: 1180px; }
+.chart-scroll > .chart { min-width: 620px; }
+.chart-fig { margin: 0; }
+.chart-fig figcaption {
+  margin-top: var(--s3); font-size: var(--t-small); color: var(--fg-mute); line-height: 1.6;
 }
-.legend-val { color: var(--fg-mute); font-family: var(--mono); font-size: var(--t-mini); font-variant-numeric: tabular-nums; }
-.legend-pct {
-  color: var(--fg); font-family: var(--mono); font-size: var(--t-mini);
-  font-variant-numeric: tabular-nums; min-width: 54px; text-align: right;
+.ch-grid  { stroke: var(--border-soft); stroke-width: 1; }
+.ch-rail, .ch-track { fill: var(--track); }
+.ch-ok      { fill: var(--ok); }
+.ch-pending { fill: var(--accent); }
+.ch-crit    { fill: var(--crit); }
+.ch-warn    { fill: var(--warn); }
+.ch-axis {
+  fill: var(--fg-mute); font-family: var(--mono); font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
-.legend .bar { margin: 1px 0 5px; height: 4px; }
+.ch-name { fill: var(--fg); font-family: var(--sans); font-size: 15px; font-weight: 600; }
+.ch-foot { fill: var(--fg-mute); font-family: var(--sans); font-size: 13px; }
+.ch-big {
+  fill: var(--fg); font-family: var(--mono); font-size: 27px; font-weight: 650;
+  letter-spacing: -.03em; font-variant-numeric: tabular-nums;
+}
+.ch-big-ok { fill: var(--ok-t); }
+
+/* The one chart carrying the page: area is bytes still to rewrite, so the
+   three rectangles you notice first are the three tables that decide how long
+   the maintenance window has to be. */
+.chart-treemap { background: var(--muted); border-radius: var(--r-md); }
+.tm-cell rect { stroke: var(--background); stroke-width: 2; cursor: pointer; transition: opacity .12s var(--e-quart); }
+.tm-pending rect { fill: var(--accent); }
+.tm-warn rect    { fill: var(--warn); }
+.tm-meta rect    { fill: color-mix(in oklab, var(--accent) 45%, var(--muted)); }
+.tm-cell:hover rect { opacity: .82; }
+.tm-cell:focus-visible { outline: none; }
+.tm-cell:focus-visible rect { stroke: var(--fg); stroke-width: 2.5; }
+.tm-name { fill: var(--primary-foreground); font-family: var(--mono); font-size: 13px; font-weight: 600; }
+.tm-val  { fill: var(--primary-foreground); font-family: var(--mono); font-size: 12px; opacity: .82; }
+.tm-meta .tm-name, .tm-meta .tm-val { fill: var(--fg); }
+.tm-warn .tm-name, .tm-warn .tm-val { fill: var(--warn-t); }
+
+.chart-mini { width: 150px; min-width: 150px; }
+
+/* Donut: parts of one whole with a dominant slice, which is the only shape a
+   donut reads better than a bar. */
+.chart-donut { max-width: 200px; margin: 0 auto; }
+.dn-slice { stroke: var(--background); stroke-width: 1.5; }
+.dn-target, .dn-key.dn-target { fill: var(--ok); background: var(--ok); }
+.dn-center {
+  fill: var(--fg); font-family: var(--mono); font-size: 26px; font-weight: 650;
+  letter-spacing: -.03em; font-variant-numeric: tabular-nums;
+}
+.dn-sub { fill: var(--fg-mute); font-family: var(--sans); font-size: 13px; }
+.dn-legend { list-style: none; margin: var(--s3) 0 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.dn-legend li {
+  display: grid; grid-template-columns: 9px 1fr auto auto; gap: var(--s2);
+  align-items: center; font-size: var(--t-mini);
+}
+.dn-key { width: 9px; height: 9px; border-radius: 2px; }
+.dn-name { font-family: var(--mono); color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dn-num { font-family: var(--mono); color: var(--fg-mute); font-variant-numeric: tabular-nums; }
+.dn-pct { font-family: var(--mono); color: var(--fg); font-variant-numeric: tabular-nums; min-width: 52px; text-align: right; }
+
+/* Timeline: the ALTER is the part everyone estimates, and the backup copy plus
+   the two checksum passes run in the same window. */
+.tl-label { font-size: 13px; font-weight: 500; fill: var(--fg-dim); font-family: var(--mono); }
+.tl-backup   { fill: var(--warn); }
+.tl-checksum { fill: color-mix(in oklab, var(--info) 70%, var(--background)); }
+.tl-alter    { fill: var(--accent); }
+.tl-other    { fill: var(--muted-2); }
+.tl-legend {
+  list-style: none; margin: var(--s3) 0 0; padding: 0;
+  display: flex; flex-wrap: wrap; gap: var(--s2) var(--s4); font-size: var(--t-mini); color: var(--fg-dim);
+}
+.tl-legend li { display: flex; align-items: center; gap: 6px; }
+.tl-key { width: 10px; height: 10px; border-radius: 2px; }
+.tl-key.tl-backup   { background: var(--warn); }
+.tl-key.tl-checksum { background: color-mix(in oklab, var(--info) 70%, var(--background)); }
+.tl-key.tl-alter    { background: var(--accent); }
+.tl-key.tl-other    { background: var(--muted-2); }
+
+/* Categorical slice colours. Mid-dark and saturated so a 9px legend key and a
+   thin donut band both hold on white, ordered for separation between
+   neighbours. */
+.sl-0 { fill: #6d28d9; background: #6d28d9; }
+.sl-1 { fill: #0f766e; background: #0f766e; }
+.sl-2 { fill: #b45309; background: #b45309; }
+.sl-3 { fill: #be123c; background: #be123c; }
+.sl-4 { fill: #1d4ed8; background: #1d4ed8; }
+.sl-5 { fill: #15803d; background: #15803d; }
+.sl-6 { fill: #a21caf; background: #a21caf; }
+.sl-7 { fill: #475569; background: #475569; }
+.sl-8 { fill: #c2410c; background: #c2410c; }
+.sl-9 { fill: #4d7c0f; background: #4d7c0f; }
 
 /* ----------------------------------------------------------------- tables */
 .table-wrap {
@@ -635,17 +749,26 @@ details.step[open] .step-title { color: var(--fg); }
 }
 .chip-clear:hover { color: var(--crit-t); background: none; }
 
-/* ------------------------------------------------------- segmented filter */
-.segbar { display: flex; flex-wrap: wrap; gap: var(--s1); margin-top: var(--s3); }
+/* ------------------------------------------------------- segmented filter
+   shadcn's Tabs: one inset muted track, and the selected tab is a raised white
+   surface inside it rather than a filled pill. The accent is not spent here -
+   this is a view switch, not an action. */
+.segbar {
+  display: inline-flex; flex-wrap: wrap; gap: var(--s1); margin-top: var(--s3);
+  background: var(--muted); border-radius: var(--r-lg); padding: var(--s1);
+  max-width: 100%;
+}
 .seg {
-  background: transparent; border: 1px solid var(--line); color: var(--fg-dim);
-  border-radius: 999px; padding: 4px var(--s3); font-size: var(--t-mini);
+  background: transparent; border: 1px solid transparent; color: var(--fg-mute);
+  border-radius: var(--r-sm); padding: 4px var(--s3); font-size: var(--t-mini);
 }
-.seg .seg-n { font-family: var(--mono); color: var(--fg-mute); margin-left: 3px; }
+.seg:hover:not(.on) { background: transparent; color: var(--fg); }
+.seg .seg-n { font-family: var(--mono); color: var(--fg-mute); margin-left: 4px; }
 .seg.on {
-  background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 650;
+  background: var(--background); border-color: var(--border-soft);
+  color: var(--fg); font-weight: 600; box-shadow: var(--sh-1);
 }
-.seg.on .seg-n { color: var(--accent-ink); opacity: .8; }
+.seg.on .seg-n { color: var(--accent-hi); }
 
 /* ---------------------------------------------------------------- explain
    Long-form "why" text is available but never in the way. */
@@ -699,6 +822,11 @@ details.explain > summary:hover { color: var(--fg); }
 .cta > div { flex: 1 1 320px; }
 .cta h2 { margin: 0 0 2px; font-size: var(--t-h2); }
 .cta .hint { margin: 0; }
+/* The overview hero is the headline and the treemap in one card: the sentence
+   states the size of the job, the chart says which tables it is made of, and
+   splitting them across two cards made you scroll between a claim and its
+   evidence. */
+.cta + .chart-treemap { margin-top: var(--s4); }
 
 /* ------------------------------------------------------------- step cards
    The whole workflow is one column of these. A locked step is visibly inert,

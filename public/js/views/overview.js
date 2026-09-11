@@ -1,46 +1,86 @@
-// Where things stand overall. Deliberately thin: the detail lives one click
-// away in the work list, and the long charset/collation breakdowns are folded
-// away so the first screen answers one question - how much is left?
+// Where things stand overall.
+//
+// This page answers one question, and it is not "what percentage is done".
+// Migration cost is bytes rewritten, and the byte distribution across tables is
+// always a power law - so "96% of tables are done" routinely sits next to "18%
+// of the bytes are done", and only the second number is the length of tonight's
+// maintenance window. The treemap shows which tables that window is made of,
+// and the bar chart underneath puts both measures on one axis so the gap
+// between them cannot be read past.
 import { api, state } from '../api.js';
 import { cache } from '../store.js';
 import { navigate } from '../app.js';
 import {
-  $, $$, esc, num, pct, bytes, note, bar, chip,
-  applyDynamicStyles, paletteColor, collapse,
+  $, $$, esc, num, pct, bytes, note, chip, collapse,
 } from '../util.js';
+import { splitBars, treemap, donut, donutLegend, miniStack } from '../charts.js';
 
 export async function render(host) {
   if (!cache.schemas) cache.schemas = (await api.schemas()).schemas;
   const d = await api.summary({});
   cache.summary = d;
-  draw(host, d);
+
+  // The biggest outstanding tables, for the treemap. Cheap: one page of the
+  // list the operator is about to click into anyway.
+  let pending = [];
+  try {
+    const list = await api.tables({ status: 'todo', sort: 'size', dir: 'desc', page: 1, pageSize: 40 });
+    pending = list.rows || [];
+  } catch { pending = []; }
+
+  draw(host, d, pending);
 }
 
-function draw(host, d) {
+function draw(host, d, pending) {
   const t = state.target;
   const oo = d.otherObjects || {};
-  const ooCounts = Object.entries(oo).filter(([k, v]) => k !== 'error' && typeof v === 'number');
-  const otherTotal = ooCounts.reduce((a, [, v]) => a + v, 0);
+  const otherTotal = Object.entries(oo)
+    .filter(([k, v]) => k !== 'error' && typeof v === 'number')
+    .reduce((a, [, v]) => a + v, 0);
   const done = d.columns.pending === 0 && d.tables.pending === 0;
+  const doneBytes = Math.max(d.tables.sizeBytes - d.tables.pendingBytes, 0);
 
-  // Headline and call to action are the same thought, so they are one card.
+  const cells = pending.map((r) => ({
+    key: r.key,
+    tableName: r.tableName,
+    value: r.sizeBytes,
+    kind: r.needsRebuild ? 'pending' : 'meta',
+  }));
+  const shown = cells.filter((c) => c.value > 0);
+  const shownBytes = shown.reduce((a, c) => a + c.value, 0);
+  const heaviest = shown.length ? shown[0] : null;
+
   host.innerHTML = `
-    <div class="card cta">
-      <div>
-        <h2>${done ? 'ครบแล้ว' : `ยังเหลือ ${num(d.tables.pending)} ตาราง`}</h2>
-        <p class="hint">${done
+    <div class="card">
+      <div class="cta">
+        <div>
+          <h2>${done ? 'ครบแล้ว' : `ยังเหลือ ${num(d.tables.pending)} ตาราง`}</h2>
+          <p class="hint">${done
     ? `ทุกตารางเป็น <code>${esc(t.charset)} / ${esc(t.collation)}</code> หมดแล้ว`
     : `${num(d.columns.pending)} คอลัมน์ ยังไม่เป็น <code>${esc(t.charset)} / ${esc(t.collation)}</code>
        ต้องเขียนข้อมูลใหม่ราวๆ <strong>${bytes(d.tables.pendingBytes)}</strong>`}</p>
+        </div>
+        ${done ? '' : '<button class="btn-primary" id="ov-go">ไปเลือกตาราง</button>'}
       </div>
-      ${done ? '' : '<button class="btn-primary" id="ov-go">ไปเลือกตาราง →</button>'}
+
+      ${shown.length ? `
+      ${treemap(shown, { height: shown.length <= 6 ? 220 : 340 })}
+      <p class="hint">แต่ละช่องคือหนึ่งตาราง ขนาดช่องคือไบต์ที่ ALTER ต้องเขียนใหม่ คลิกเพื่อเข้าไปทำตารางนั้น
+        ${heaviest ? `<br>ตัวใหญ่สุดคือ <code>${esc(heaviest.key)}</code> ที่ ${bytes(heaviest.value)} —
+        ${pct((heaviest.value / (shownBytes || 1)) * 100)} ของงานที่เห็นในภาพนี้อยู่ในตารางเดียว` : ''}
+        <br>${shown.length < d.tables.pending
+    ? `แสดง ${num(shown.length)} ตารางใหญ่ที่สุด จาก ${num(d.tables.pending)} ตารางที่ยังต้องแปลง`
+    : `ครบทั้ง ${num(shown.length)} ตารางที่ยังต้องแปลง`}${cells.some((c) => c.kind === 'meta')
+    ? ' ช่องสีจางคือตารางที่แก้แค่ default ไม่ต้องเขียนข้อมูลใหม่' : ''}</p>` : ''}
     </div>
 
     <div class="card">
-      <div class="progress-rows">
-        ${progressRow('ตาราง', d.tables.compliant, d.tables.pending, d.tables.compliantPct)}
-        ${progressRow('คอลัมน์ข้อความ', d.columns.compliant, d.columns.pending, d.columns.compliantPct)}
-      </div>
+      <h2>ความคืบหน้า</h2>
+      ${splitBars([
+    { label: 'ตาราง', done: d.tables.compliant, total: d.tables.total },
+    { label: 'คอลัมน์ข้อความ', done: d.columns.compliant, total: d.columns.text },
+    { label: 'ขนาดข้อมูล', done: doneBytes, total: d.tables.sizeBytes, unit: 'bytes' },
+  ], { caption: divergenceNote(d, doneBytes) })}
     </div>
 
     <div class="card">
@@ -50,29 +90,22 @@ function draw(host, d) {
           <thead><tr><th>schema</th><th>default ของ schema</th><th class="num">ตาราง</th>
             <th>ที่เรียบร้อยแล้ว</th><th class="num">ขนาด</th></tr></thead>
           <tbody>
-            ${d.schemas.rows.map((s) => `<tr>
-              <td class="mono"><button class="btn-sm btn-ghost" data-schema="${esc(s.schemaName)}">${esc(s.schemaName)}</button></td>
-              <td class="mono">${chip(`${s.schemaCharset} / ${s.schemaCollation}`, s.schemaCollation === t.collation ? 'chip-ok' : 'chip-bad')}</td>
-              <td class="num">${num(s.tables)}</td>
-              <td>${num(s.compliantTables)} <span class="hint">(${pct(s.tablePct)})</span>${bar(s.tablePct, s.tablePct >= 99.99 ? 'ok' : s.tablePct > 0 ? 'warn' : 'crit')}</td>
-              <td class="num nowrap">${bytes(s.sizeBytes)}</td>
-            </tr>`).join('')}
+            ${schemaRows(d, t)}
           </tbody>
         </table>
       </div>
+      <p class="hint">แท่งใช้สเกลร่วมกันทุกแถว ความยาวจึงเทียบกันได้ตรงๆ ว่า schema ไหนมีตารางเยอะกว่า</p>
     </div>
 
     ${collapse('ดูสัดส่วนตาม charset กับ collation', `
       <div class="grid grid-2">
         <div>
           <h4>ตาม CHARACTER SET</h4>
-          <p class="hint">จาก ${num(d.columns.text)} คอลัมน์</p>
-          ${breakdown(d.byCharset, 'charset', 'columns', t.charset)}
+          ${breakdown(d.byCharset, 'charset', t.charset, d.columns.text)}
         </div>
         <div>
           <h4>ตาม COLLATION</h4>
-          <p class="hint">จาก ${num(d.columns.text)} คอลัมน์</p>
-          ${breakdown(d.byCollation, 'collation', 'columns', t.collation)}
+          ${breakdown(d.byCollation, 'collation', t.collation, d.columns.text)}
         </div>
       </div>`)}
 
@@ -80,44 +113,60 @@ function draw(host, d) {
       view / routine / trigger / event ที่ charset ไม่ตรงมีอีก ${num(otherTotal)} ตัว
       การแปลงตารางไม่ได้แก้ให้ ต้อง <code>DROP</code> แล้วสร้างใหม่เอง`) : ''}`;
 
-  applyDynamicStyles(host);
   const go = $('#ov-go', host);
   if (go) go.addEventListener('click', () => navigate('tables'));
   for (const b of $$('[data-schema]', host)) {
     b.addEventListener('click', () => navigate('tables', { schema: b.dataset.schema }));
   }
+  // Treemap cells are <g> elements, so they need an explicit keyboard path -
+  // a focusable SVG group fires no click on Enter the way a <button> would.
+  for (const cell of $$('.tm-cell', host)) {
+    const open = () => navigate('table', { key: cell.dataset.open });
+    cell.addEventListener('click', open);
+    cell.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
+    });
+  }
 }
 
-/** One labelled bar. Stacked, these share a baseline and a scale, so the two
- *  numbers can be read against each other at a glance. */
-function progressRow(name, done, pending, percent) {
-  return `
-    <div class="prow">
-      <div class="prow-head">
-        <span class="prow-name">${esc(name)}</span>
-        <span class="prow-pct">${pct(percent)}</span>
-      </div>
-      <div class="prow-bar"><span class="${pending === 0 ? 'complete' : ''}" data-width="${percent}"></span></div>
-      <div class="prow-foot">
-        <span>เรียบร้อยแล้ว <b>${num(done)}</b></span>
-        <span>ยังต้องแปลง <b>${num(pending)}</b></span>
-      </div>
-    </div>`;
+/**
+ * The caption exists to say the uncomfortable thing out loud when the two
+ * measures disagree: finishing most of the tables is not the same as finishing
+ * most of the work, and the second number is the one that decides the window.
+ */
+function divergenceNote(d, doneBytes) {
+  const tablePct = d.tables.compliantPct;
+  const bytePct = d.tables.sizeBytes ? (doneBytes / d.tables.sizeBytes) * 100 : 100;
+  if (d.tables.pending === 0) return 'ทุกตารางถึงเป้าหมายแล้ว';
+  if (tablePct - bytePct < 12) return 'จำนวนตารางกับปริมาณข้อมูลเดินไปด้วยกัน ประเมินเวลาจากตัวไหนก็ได้';
+  return `ทำไปแล้ว ${pct(tablePct)} ของจำนวนตาราง แต่เพิ่ง ${pct(bytePct)} ของปริมาณข้อมูล —
+    เวลาที่เหลือให้ดูจากแถวล่าง ตารางใหญ่ไม่กี่ตัวคือเวลาเกือบทั้งหมด`;
 }
 
-function breakdown(rows, keyField, countField, targetValue) {
+function schemaRows(d, t) {
+  const maxTables = Math.max(...d.schemas.rows.map((s) => s.tables), 1);
+  return d.schemas.rows.map((s) => `<tr>
+    <td class="mono"><button class="btn-sm btn-ghost" data-schema="${esc(s.schemaName)}">${esc(s.schemaName)}</button></td>
+    <td class="mono">${chip(`${s.schemaCharset} / ${s.schemaCollation}`, s.schemaCollation === t.collation ? 'chip-ok' : 'chip-bad')}</td>
+    <td class="num">${num(s.tables)}</td>
+    <td>${miniStack(s.compliantTables, s.tables - s.compliantTables, maxTables)}
+        <div class="hint">${num(s.compliantTables)} / ${num(s.tables)} (${pct(s.tablePct)})</div></td>
+    <td class="num nowrap">${bytes(s.sizeBytes)}</td>
+  </tr>`).join('');
+}
+
+function breakdown(rows, keyField, targetValue, totalColumns) {
   if (!rows.length) return '<div class="empty">ไม่มีข้อมูล</div>';
-  return `<div class="legend">
-    ${rows.map((r, i) => {
-    const isTarget = r[keyField] === targetValue;
-    const color = isTarget ? 'var(--ok)' : paletteColor(i + 1);
-    return `<div class="legend-row">
-        <span class="legend-dot" data-bg="${color}"></span>
-        <span class="legend-name" title="${esc(r[keyField])}">${esc(r[keyField] || '(none)')}</span>
-        <span class="legend-val">${num(r[countField])}</span>
-        <span class="legend-pct">${pct(r.pct)}</span>
-      </div>
-      <div class="bar ${isTarget ? 'ok' : ''}"><span data-width="${r.pct}" data-bg="${color}"></span></div>`;
-  }).join('')}
-  </div>`;
+  const slices = rows.map((r) => ({
+    label: r[keyField] || '(none)',
+    value: r.columns,
+    target: r[keyField] === targetValue,
+  }));
+  const onTarget = slices.find((s) => s.target);
+  const share = onTarget && totalColumns ? (onTarget.value / totalColumns) * 100 : 0;
+  return `${donut(slices, {
+    centerLabel: pct(share),
+    centerSub: 'ถึงเป้าหมาย',
+  })}${donutLegend(slices)}
+  <p class="hint">จาก ${num(totalColumns)} คอลัมน์ข้อความ</p>`;
 }
