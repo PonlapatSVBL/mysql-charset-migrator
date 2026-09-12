@@ -85,7 +85,7 @@ export function tableState(key) {
   if (!work.byTable[key]) {
     work.byTable[key] = {
       preflightId: null, preflightGate: null, preflightAt: null,
-      checksumId: null, checksumAt: null,
+      checksumId: null, checksumAt: null, checksumOk: null,
       planId: null, planAt: null,
       jobId: null, jobStatus: null,
       verifyId: null, verifyOk: null, verifyAppended: 0,
@@ -131,7 +131,9 @@ export function tableBody(key, extra = {}) {
 /** Which step the operator should be looking at next. */
 export function nextStep(st) {
   if (!st.preflightId || st.preflightGate === null) return 1;
-  if (!st.checksumId) return 2;
+  // A baseline that failed leaves nothing to verify against, so it holds the
+  // workflow here rather than letting a plan be built on top of it.
+  if (!st.checksumId || st.checksumOk === false) return 2;
   if (!st.planId) return 3;
   if (!st.jobId || st.jobStatus !== 'done') return 4;
   return 5;

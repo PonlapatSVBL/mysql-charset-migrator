@@ -443,11 +443,15 @@ function showTableDetail(tb, target) {
 function stepBaseline(st, at) {
   const locked = at < 2;
   const plan = detail.facts.checksumPlan || {};
-  const status = st.checksumId ? 'done' : (locked ? '' : 'ready');
+  // An id is not a baseline. A digest that timed out is stored like any other
+  // result and used to render as "เก็บแล้ว" in green, which is how a table with
+  // no baseline reached the verify step and came back reading as corruption.
+  const failed = st.checksumOk === false;
+  const status = failed ? 'problem' : st.checksumId ? 'done' : (locked ? '' : 'ready');
   return step({
     n: 2,
     title: 'เก็บ baseline ไว้เทียบทีหลัง',
-    sub: st.checksumId ? 'เก็บแล้ว' : 'ไว้เช็คตอนแปลงเสร็จว่าข้อมูลยังเหมือนเดิม',
+    sub: failed ? 'เก็บไม่สำเร็จ' : st.checksumId ? 'เก็บแล้ว' : 'ไว้เช็คตอนแปลงเสร็จว่าข้อมูลยังเหมือนเดิม',
     status,
     locked,
     lockReason: 'ทำขั้น 1 ให้เสร็จก่อน',
@@ -496,7 +500,7 @@ function wireBaseline(host) {
         mode: $('#cs-mode', host) ? $('#cs-mode', host).value : 'sha256',
         deep: $('#cs-deep', host) ? $('#cs-deep', host).checked : false,
       }));
-      setTableState(key, { checksumId: task.id, checksumAt: task.createdAt, verifyId: null, verifyOk: null });
+      setTableState(key, { checksumId: task.id, checksumAt: task.createdAt, checksumOk: null, verifyId: null, verifyOk: null });
       watchTask(host, 'checksum', task.id);
     } catch (err) {
       toast(err.message, 'err', 9000);
@@ -528,8 +532,21 @@ async function loadChecksum(host, id, announce = false) {
     cache('checksum', id, r);
   }
   const tb = r.tables[key];
+  const ok = !!(tb && !tb.error && tb.digest !== null && tb.digest !== undefined);
+  const st0 = tableState(key);
+  if (st0.checksumOk !== ok) { setTableState(key, { checksumOk: ok }); redraw(); return; }
   if (!box) return;
   if (!tb) { box.innerHTML = note('warn', null, 'ใน snapshot นี้ไม่มีข้อมูลของตารางนี้'); return; }
+  if (!ok) {
+    box.innerHTML = `
+      ${note('crit', 'เก็บ baseline ไม่สำเร็จ', `${esc(tb.error || 'ไม่ได้ค่า digest')}<br>`
+        + 'ตารางนี้ยังไม่มีอะไรให้เทียบตอนแปลงเสร็จ — เก็บใหม่ด้วยวิธีที่เบากว่าใน '
+        + '<strong>ตัวเลือกขั้นสูง</strong> เช่น “สุ่มดูแถวแรกๆ ตาม primary key” หรือ “นับแค่จำนวนแถว” '
+        + 'ก่อนจะไปขั้นต่อไป')}
+      <div class="row-tight"><div class="spacer"></div><span class="hint mono">${esc(id)}</span></div>`;
+    if (announce) toast('เก็บ baseline ไม่สำเร็จ', 'err', 9000);
+    return;
+  }
   box.innerHTML = `
     ${note('ok', 'เก็บแล้ว', `${esc(strategyLabel(tb.strategy))} · ${tb.scannedRows !== undefined ? `${num(tb.scannedRows)} แถว` : `${num(tb.rowCount)} แถว`} · ${esc(duration(tb.durationMs))}`)}
     ${r.legacy ? note('warn', 'baseline เก่าก่อนแยกเครื่อง',
@@ -1231,19 +1248,27 @@ async function loadVerify(host, id, announce = false) {
     return;
   }
   if (!box) return;
+  // "Could not be compared" is not "did not match", and the difference decides
+  // whether an operator rolls a working migration back.
+  const incomparable = cmp.comparable === false;
   box.innerHTML = ok
     ? note('ok', 'ข้อมูลยังเหมือนเดิม', cmp.caveat
       ? `ค่าและจำนวนแถวเท่าเดิม <strong>แต่ดูแค่บางส่วน:</strong> ${esc(cmp.caveat)}`
       : 'ค่าและจำนวนแถวเท่าเดิมทุกตัว การแปลงไม่ได้ทำให้ตัวอักษรไหนเปลี่ยน')
-    : appended
-      ? note('warn', `มีแถวเพิ่มมา ${num(appended)} แถวหลังเก็บ baseline`, `
-        ตารางนี้ยังรับ write อยู่ระหว่างที่ทำงาน การเทียบแบบนับแถวจึงบอกได้แค่ว่าจำนวนแถวขยับ
-        ไม่ได้บอกว่าข้อมูลเดิมเปลี่ยน${jobVerdictLine()}`)
-      : note('crit', 'ข้อมูลไม่ตรงกับ baseline', `<ul>${cmp.issues.map((i) => `<li>${esc(i)}</li>`).join('')}</ul>
-        ถ้าจะย้อนกลับ ไปที่หน้า “งานที่รันไปแล้ว”`);
+    : incomparable
+      ? note('warn', 'เทียบไม่ได้ ไม่ใช่ว่าข้อมูลเปลี่ยน', `<ul>${cmp.issues.map((i) => `<li>${esc(i)}</li>`).join('')}</ul>
+        <strong>ยังไม่มีเหตุผลให้ย้อนกลับ</strong> — สิ่งที่ขาดคือ baseline ที่ใช้เทียบได้
+        กลับไปขั้น 2 เก็บใหม่ด้วยวิธีที่เบากว่า แล้วค่อยมาเทียบอีกครั้ง`)
+      : appended
+        ? note('warn', `มีแถวเพิ่มมา ${num(appended)} แถวหลังเก็บ baseline`, `
+          ตารางนี้ยังรับ write อยู่ระหว่างที่ทำงาน การเทียบแบบนับแถวจึงบอกได้แค่ว่าจำนวนแถวขยับ
+          ไม่ได้บอกว่าข้อมูลเดิมเปลี่ยน${jobVerdictLine()}`)
+        : note('crit', 'ข้อมูลไม่ตรงกับ baseline', `<ul>${cmp.issues.map((i) => `<li>${esc(i)}</li>`).join('')}</ul>
+          ถ้าจะย้อนกลับ ไปที่หน้า “งานที่รันไปแล้ว”`);
   if (announce) {
     toast(ok ? 'เรียบร้อย ข้อมูลยังเหมือนเดิม'
-      : appended ? `มีแถวเพิ่มมา ${num(appended)} แถวหลัง baseline`
-        : 'ข้อมูลไม่ตรงกับ baseline', ok ? 'ok' : appended ? 'warn' : 'err', 9000);
+      : incomparable ? 'เทียบไม่ได้ เพราะ baseline เก็บไม่สำเร็จ'
+        : appended ? `มีแถวเพิ่มมา ${num(appended)} แถวหลัง baseline`
+          : 'ข้อมูลไม่ตรงกับ baseline', ok ? 'ok' : incomparable || appended ? 'warn' : 'err', 9000);
   }
 }

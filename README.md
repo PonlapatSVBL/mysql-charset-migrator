@@ -408,9 +408,13 @@ digest แบบเต็มตารางบนตาราง 60 GB คือ
 
 | strategy | เลือกเมื่อ | อ่านอะไร |
 |---|---|---|
-| `full` | ขนาด ≤ `config.scan.checksumFullMaxBytes` (2 GB) | ทั้งตาราง |
-| `pk_head` | ใหญ่กว่านั้น **และ** มี primary key ที่ลำดับไม่เปลี่ยน | `ORDER BY <pk> LIMIT 200000` |
-| `rowcount` | ใหญ่ และไม่มี PK แบบนั้น | `COUNT(*)` อย่างเดียว |
+| `full` | ขนาด ≤ `checksumFullMaxBytes` (2 GB) **และ** แถว ≤ `checksumFullMaxRows` (1,000,000) | ทั้งตาราง |
+| `pk_head` | เกินเพดานใดเพดานหนึ่ง **และ** มี primary key ที่ลำดับไม่เปลี่ยน | `ORDER BY <pk> LIMIT 200000` |
+| `rowcount` | เกินเพดาน และไม่มี PK แบบนั้น | `COUNT(*)` อย่างเดียว |
+
+**ทำไมต้องดูจำนวนแถวด้วย ไม่ใช่แค่ขนาด** — ตารางแคบๆ ที่มี 3.6 ล้านแถวกินพื้นที่ไม่ถึงเพดาน 2 GB
+แต่ใช้เวลา hash นานเกิน `scan.statementTimeoutSec` (60 วินาที) แล้ว digest ก็ถูก MySQL ตัดทิ้งกลางคัน
+digest ที่ timeout ไม่ใช่ baseline — มันคือตารางที่ไม่มี baseline แต่ดูเหมือนมี
 
 **ทำไม `LIMIT` เฉยๆ ใช้เทียบก่อน/หลังไม่ได้** — `LIMIT n` ที่ไม่มี `ORDER BY` ไม่รับประกันว่าจะได้แถวชุดเดิม
 ก่อนและหลัง ALTER ที่ rebuild ตารางใหม่ทั้งก้อน digest สองค่าจึงเทียบกันไม่ได้ตั้งแต่ต้น (ของเดิมมี `rowLimit` แบบนี้)
@@ -819,6 +823,7 @@ env var ทั้งหมดที่ `config.js` และ `security.js` อ�
 | `CSMIG_SCAN_TIMEOUT` | `60` | วินาที → `max_execution_time` (MySQL) + `max_statement_time` (MariaDB) บน connection ที่ใช้สแกน · ถูกล้างก่อนคืน connection เข้า pool |
 | `CSMIG_CHECKSUM_ROWS` | `200000` | จำนวนแถวของ strategy `pk_head` |
 | `CSMIG_CHECKSUM_FULL_MAX_BYTES` | `2147483648` (2 GB) | ใหญ่กว่านี้ `auto` จะเลิกอ่านทั้งตาราง |
+| `CSMIG_CHECKSUM_FULL_MAX_ROWS` | `1000000` | แถวมากกว่านี้ `auto` ก็เลิกอ่านทั้งตารางเช่นกัน เพราะ hash จะเกิน statement timeout |
 | `CSMIG_EXACT_COUNT_MAX_BYTES` | `2147483648` (2 GB) | ใหญ่กว่านี้ข้าม `COUNT(*)` ใช้ค่าประมาณแทน |
 | `CSMIG_ALLOW_BULK` | ไม่ตั้ง (= บังคับทีละตาราง) | `=1` ปิดการบังคับ 1 ตารางต่อ 1 operation — **ไม่แนะนำ** |
 | `CSMIG_BOOT_KEY` | สุ่มใหม่ทุก start (18 bytes base64url) | ตั้ง boot key คงที่ (ใช้เฉพาะเมื่อจำเป็น เช่น automation — ค่าคงที่ลดความปลอดภัยของชั้นที่ 2) |

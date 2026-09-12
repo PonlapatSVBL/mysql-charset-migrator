@@ -67,9 +67,14 @@ module.exports = {
 
     // Checksum
     checksumRowLimit: Number(process.env.CSMIG_CHECKSUM_ROWS || 200000),
-    // Above this size a full-table digest is replaced by a deterministic
-    // PK-ordered head sample (see server/lib/checksum.js).
+    // Above either of these a full-table digest is replaced by a deterministic
+    // PK-ordered head sample (see server/lib/checksum.js). Bytes alone was not
+    // enough: a narrow table of several million rows sits well under the size
+    // ceiling and still takes longer to hash than statementTimeoutSec allows,
+    // and a digest that times out is not a baseline - it is a table with no
+    // baseline that looks like one.
     checksumFullMaxBytes: Number(process.env.CSMIG_CHECKSUM_FULL_MAX_BYTES || 2 * 1024 ** 3),
+    checksumFullMaxRows: Number(process.env.CSMIG_CHECKSUM_FULL_MAX_ROWS || 1_000_000),
     // Exact COUNT(*) is itself a full scan on InnoDB - skip it above this size.
     exactRowCountMaxBytes: Number(process.env.CSMIG_EXACT_COUNT_MAX_BYTES || 2 * 1024 ** 3),
   },
