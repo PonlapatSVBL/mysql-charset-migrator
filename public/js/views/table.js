@@ -13,6 +13,7 @@ import {
   $, $$, esc, num, pct, bytes, duration, note, chip, toast, applyDynamicStyles, showModal,
   confirmDialog, copyToClipboard, levelKind, collapse, setBusy, isBusy,
 } from '../util.js';
+import { AUTO_PHASES, autoNext } from '../autorun.js';
 
 let key = null;
 let detail = null;
@@ -33,6 +34,11 @@ export function dispose() {
   for (const t of timers) clearInterval(t);
   timers = [];
   setBusy(false);
+  // Leaving the view kills the pollers the runner is awaiting, so its loop
+  // would sit on a promise that never settles. Flag it as cancelled so the
+  // next tick through the loop stops instead.
+  if (auto) auto.cancelled = true;
+  auto = null;
 }
 
 // Every long-running thing on this page is polled, so "a poller is alive" is
@@ -77,6 +83,7 @@ export async function render(host, params) {
       <div class="row-tight">
         <button class="btn-sm btn-ghost" id="tw-back">← รายการตาราง</button>
         <div class="spacer"></div>
+        ${detail.facts.needsChange ? '<button class="btn-sm" id="tw-auto-run">▶ รันทุกขั้นอัตโนมัติ</button>' : ''}
         <button class="btn-sm btn-ghost" id="tw-reset">เริ่มใหม่</button>
       </div>
       <h2 class="tw-title mono">${esc(schemaName)}.<strong>${esc(tableName)}</strong></h2>
@@ -100,9 +107,12 @@ export async function render(host, params) {
         </table></div>`) : ''}
     </div>
 
+    <div id="tw-auto" class="autorun-dock"></div>
     <div id="tw-steps"></div>`;
 
   $('#tw-back', host).addEventListener('click', () => navigate('tables'));
+  const autoBtn = $('#tw-auto-run', host);
+  if (autoBtn) autoBtn.addEventListener('click', () => runAuto(host));
   $('#tw-reset', host).addEventListener('click', async () => {
     const ok = await confirmDialog({
       title: 'เริ่มใหม่ตั้งแต่ขั้น 1',
@@ -162,6 +172,199 @@ async function drawSteps(host) {
 }
 
 const redraw = () => drawSteps($('#view'));
+
+/* ---------------------------------------------------------------- autorun */
+
+/**
+ * The one-button run.
+ *
+ * It does not click the buttons - a step that finishes calls redraw(), which
+ * replaces every node on the page, so a driver holding element references
+ * would be driving corpses by step two. Instead each phase calls the same
+ * `start*` function its button calls and awaits the promise that resolves once
+ * the result has been written to the store. The store is the thing that
+ * survives a redraw, so it is the thing the stop policy reads.
+ *
+ * Authorisation is taken once, up front. Every gate that would have escalated
+ * to FORCE stops the run instead of being answered on the operator's behalf.
+ */
+let auto = null;
+
+const PHASE_RUNNERS = {
+  preflight: (host) => startPreflight(host, preflightOptions(host)),
+  baseline: (host) => startBaseline(host, baselineOptions(host)),
+  // Forced to the recommended column set, which is what the button pair
+  // "ที่แนะนำ" + "สร้างคำสั่ง" produces. Backup and schema-default are read
+  // from the step's own controls so an operator who set them keeps them.
+  plan: (host) => startPlan(host, {
+    strategy: 'modify_columns',
+    columns: recommendedColumns(),
+    backupStrategy: $('#pl-backup', host) ? $('#pl-backup', host).value : 'none',
+    includeSchemaDefaults: $('#pl-schemadef', host) ? $('#pl-schemadef', host).checked : false,
+    includeTableDefaults: true,
+    order: 'size_asc',
+  }),
+  dryrun: (host) => startRun(host, true, { auto: true }),
+  run: (host) => startRun(host, false, { auto: true }),
+  verify: (host) => startVerify(host),
+};
+
+/** The flat snapshot autoNext() reads, assembled from the store plus what the
+ *  phase just returned. Only the fields that phase can speak to are filled. */
+function autoSnapshot(phase, outcome) {
+  const st = tableState(key);
+  const s = {
+    cancelled: !!(auto && auto.cancelled),
+    preflightGate: st.preflightGate,
+    preflightScanned: st.preflightScanned,
+    checksumOk: st.checksumOk,
+    verifyOk: st.verifyOk,
+  };
+  if (phase === 'preflight' || phase === 'baseline' || phase === 'verify') {
+    s.taskStatus = outcome ? outcome.status : 'failed';
+  }
+  if (phase === 'plan') {
+    s.planId = outcome ? outcome.planId : null;
+    s.planRebuilds = outcome && outcome.plan ? outcome.plan.summary.rebuilds : 0;
+  }
+  if (phase === 'dryrun') s.dryRunStatus = outcome;
+  if (phase === 'run') s.jobStatus = outcome;
+  return s;
+}
+
+/**
+ * Did the phase itself finish?
+ *
+ * Deliberately separate from autoNext(): "the scan ran and found a blocker" and
+ * "the scan fell over" are both stops, but only the second one is a failure of
+ * that phase. Marking the first with a ✗ would tell the operator their preflight
+ * broke when what actually happened is that it worked and said no.
+ */
+function phaseCompleted(phase, outcome) {
+  if (phase === 'plan') return !!(outcome && outcome.planId);
+  if (phase === 'dryrun' || phase === 'run') return outcome === 'done';
+  return !!(outcome && outcome.status === 'done');
+}
+
+function renderAuto(host) {
+  const box = $('#tw-auto', host);
+  if (!box) return;
+  // The dock class is what lifts the panel over the busy backdrop and pins it
+  // to the top of the scroller, so the stop button stays reachable however far
+  // down the steps the operator has scrolled. See .autorun-dock in app.css.
+  box.className = `autorun-dock${auto && auto.running ? ' running' : ''}`;
+  if (!auto) { box.innerHTML = ''; return; }
+  const icon = { done: '✓', running: '•', stopped: '✗', pending: '' };
+  const rows = AUTO_PHASES.map((p) => {
+    const st = auto.phase[p.id] || 'pending';
+    return `<li class="auto-row ${st}">
+      <span class="auto-dot">${icon[st] || ''}</span>
+      <span class="auto-label">${esc(p.label)}</span>
+      <span class="hint">ขั้น ${p.step}</span>
+    </li>`;
+  }).join('');
+  const done = auto.verdict && auto.verdict.code === 'finished';
+  box.innerHTML = `
+    <div class="card autorun${auto.running ? ' running' : ''}">
+      <div class="row-tight">
+        <strong>รันทุกขั้นอัตโนมัติ</strong>
+        <div class="spacer"></div>
+        ${auto.running
+    ? '<button class="btn-sm btn-ghost" id="auto-stop">หยุดหลังขั้นที่กำลังทำ</button>'
+    : '<button class="btn-sm btn-ghost" id="auto-dismiss">ปิด</button>'}
+      </div>
+      <ol class="auto-list">${rows}</ol>
+      ${auto.verdict && !auto.running
+    ? note(done ? 'ok' : auto.verdict.code === 'cancelled' ? 'warn' : 'crit',
+      // note() escapes the heading itself; only the body half needs esc().
+      auto.verdict.reason, esc(auto.verdict.hint || ''))
+    : ''}
+    </div>`;
+  const stop = $('#auto-stop', box);
+  if (stop) {
+    stop.addEventListener('click', () => {
+      auto.cancelled = true;
+      stop.disabled = true;
+      toast('จะหยุดหลังขั้นที่กำลังทำอยู่เสร็จ', 'warn');
+    });
+  }
+  const dismiss = $('#auto-dismiss', box);
+  if (dismiss) dismiss.addEventListener('click', () => { auto = null; renderAuto(host); });
+}
+
+async function runAuto(host) {
+  // The page is unlocked in the gaps between phases, so isBusy() alone would
+  // let a second click through and start a rival loop on the same table.
+  if (auto && auto.running) { toast('ชุดอัตโนมัติกำลังทำงานอยู่แล้ว', 'warn'); return; }
+  if (isBusy()) { toast(`${isBusy()} — รอให้เสร็จก่อน`, 'warn'); return; }
+  const st0 = tableState(key);
+  const cols = recommendedColumns();
+  const ok = await confirmDialog({
+    title: `รันทุกขั้นอัตโนมัติกับ ${key}`,
+    body: `
+      ${note('warn', null, `จะทำ 6 อย่างต่อกันเอง: ตรวจข้อมูล → เก็บ baseline → สร้างคำสั่งจากคอลัมน์
+        "ที่แนะนำ" → ลองรัน → <strong>รันจริง</strong> → เทียบกับ baseline
+        ยืนยันครั้งนี้ครั้งเดียว ระหว่างทางจะไม่ถามอีก`)}
+      ${note('info', 'จะหยุดเองเมื่อ', `<ul>
+        <li>ขั้น 1 บอกว่าข้อมูลจะเสีย หรือตารางถูกข้ามตอนสแกน (สองเคสนี้ต้องพิมพ์ FORCE จึงไม่ทำให้อัตโนมัติ)</li>
+        <li>เก็บ baseline ไม่ได้ค่าที่เอาไปเทียบได้</li>
+        <li>"ที่แนะนำ" ไม่ติ๊กคอลัมน์ไหนเลย</li>
+        <li>ลองรันไม่ผ่าน หรือรันจริงจบไม่สวย</li></ul>`)}
+      ${st0.preflightGate === 'block' || st0.preflightScanned === false
+    ? note('crit', 'ผลตรวจรอบก่อนตีกลับไว้', 'จะสแกนใหม่ก่อน ถ้าผลใหม่ยังตีกลับ ระบบจะหยุดที่ขั้น 1')
+    : ''}
+      ${detail.pendingColumns.length && !cols.length
+    ? note('warn', 'ตอนนี้ "ที่แนะนำ" ยังไม่ติ๊กคอลัมน์ไหนเลย',
+      'ผลสแกนรอบใหม่อาจเปลี่ยนให้ ถ้ายังไม่ติ๊ก ระบบจะหยุดที่ขั้น 3 ไม่รันอะไรกับข้อมูล')
+    : ''}`,
+    confirmText: 'เริ่มรันทั้งชุด',
+    danger: true,
+    requireText: 'RUN',
+  });
+  if (!ok) return;
+
+  // `run` is this loop's own handle on its state. dispose() drops the module's
+  // `auto` when the operator navigates away mid-run; comparing against it is
+  // how the loop learns that it is no longer the current run and stops writing
+  // to a panel that belongs to another table.
+  const run = { running: true, cancelled: false, phase: {}, verdict: null };
+  auto = run;
+  renderAuto(host);
+
+  for (const p of AUTO_PHASES) {
+    if (auto !== run) return;
+    if (run.cancelled) { run.verdict = { code: 'cancelled', reason: 'ยกเลิกโดยผู้ใช้' }; break; }
+    run.phase[p.id] = 'running';
+    renderAuto(host);
+
+    let outcome = null;
+    try {
+      outcome = await PHASE_RUNNERS[p.id](host);
+    } catch (err) {
+      if (auto !== run) return;
+      run.phase[p.id] = 'stopped';
+      run.verdict = { code: 'error', reason: `ขั้น "${p.label}" ล้มเหลว`, hint: err.message };
+      break;
+    }
+    if (auto !== run) return;
+
+    run.phase[p.id] = phaseCompleted(p.id, outcome) ? 'done' : 'stopped';
+    const verdict = autoNext(p.id, autoSnapshot(p.id, outcome));
+    if (verdict.go) {
+      renderAuto(host);
+      continue;
+    }
+    // Where the run stopped is readable from the rows that never left
+    // 'pending', so the verdict below carries the reason rather than the place.
+    run.verdict = verdict;
+    break;
+  }
+
+  run.running = false;
+  renderAuto(host);
+  const v = run.verdict || { code: 'finished', reason: 'เสร็จครบทุกขั้น' };
+  toast(v.reason, v.code === 'finished' ? 'ok' : v.code === 'cancelled' ? 'warn' : 'err', 12000);
+}
 
 /** One step shell. `state` drives the badge and whether the body is open. */
 function step({ n, title, sub, status, locked, lockReason, body }) {
@@ -235,33 +438,49 @@ function stepPreflight(st, at) {
 const verdictText = (gate) => (gate === 'block' ? 'มีปัญหา ต้องแก้ก่อน'
   : gate === 'warn' ? 'ผ่าน แต่มีเรื่องต้องดู' : 'ผ่าน');
 
+/** Read the step's controls, falling back to the same defaults they render with. */
+function preflightOptions(host) {
+  const rows = $('#pf-rows', host) ? $('#pf-rows', host).value : '';
+  const full = rows === 'full';
+  return {
+    rowLimit: full ? 0 : Number(rows) || undefined,
+    fullScan: full,
+    sampleSize: Number($('#pf-samples', host) ? $('#pf-samples', host).value : 5),
+    checkUnique: $('#pf-unique', host) ? $('#pf-unique', host).checked : true,
+    checkDoubleEncoding: $('#pf-double', host) ? $('#pf-double', host).checked : true,
+  };
+}
+
+/**
+ * Start step 1 and resolve with its terminal status.
+ *
+ * Split out of the click handler so the auto-runner drives the same code path
+ * the button does. Everything that decides *what* to scan is a parameter, so
+ * neither caller depends on the other's DOM being present.
+ */
+async function startPreflight(host, opts) {
+  const btn = $('#pf-run', host);
+  if (btn) btn.disabled = true;
+  try {
+    const task = await api.preflight(tableBody(key, opts));
+    setTableState(key, {
+      preflightId: task.id, preflightGate: null, preflightAt: task.createdAt,
+      // The old verdict belongs to the old id; leaving it would let the
+      // picker vouch for columns using a scan that has been superseded.
+      preflightScanned: false, preflightCoverage: null, preflightRows: null, preflightColumns: {},
+    });
+    return await watchTask(host, 'preflight', task.id);
+  } catch (err) {
+    toast(err.message, 'err', 9000);
+    if (btn) btn.disabled = false;
+    return { status: 'failed', error: err.message };
+  }
+}
+
 function wirePreflight(host) {
   const btn = $('#pf-run', host);
   if (!btn) return;
-  btn.addEventListener('click', async () => {
-    const rows = $('#pf-rows', host) ? $('#pf-rows', host).value : '';
-    const full = rows === 'full';
-    btn.disabled = true;
-    try {
-      const task = await api.preflight(tableBody(key, {
-        rowLimit: full ? 0 : Number(rows) || undefined,
-        fullScan: full,
-        sampleSize: Number($('#pf-samples', host) ? $('#pf-samples', host).value : 5),
-        checkUnique: $('#pf-unique', host) ? $('#pf-unique', host).checked : true,
-        checkDoubleEncoding: $('#pf-double', host) ? $('#pf-double', host).checked : true,
-      }));
-      setTableState(key, {
-        preflightId: task.id, preflightGate: null, preflightAt: task.createdAt,
-        // The old verdict belongs to the old id; leaving it would let the
-        // picker vouch for columns using a scan that has been superseded.
-        preflightScanned: false, preflightCoverage: null, preflightRows: null, preflightColumns: {},
-      });
-      watchTask(host, 'preflight', task.id);
-    } catch (err) {
-      toast(err.message, 'err', 9000);
-      btn.disabled = false;
-    }
-  });
+  btn.addEventListener('click', () => startPreflight(host, preflightOptions(host)));
   const cancel = $('#pf-cancel', host);
   if (cancel) {
     cancel.addEventListener('click', async () => {
@@ -271,59 +490,76 @@ function wirePreflight(host) {
   }
 }
 
-/** Shared progress poller for the two long scans. */
+/**
+ * Shared progress poller for the two long scans.
+ *
+ * Resolves with the task's terminal status once the result has been loaded and
+ * the store has settled, so the auto-runner can await a phase rather than
+ * racing the redraw it triggers. Callers that only want the side effects
+ * ignore the promise, which is why nothing here rejects.
+ */
 function watchTask(host, kind, id) {
-  const prefix = kind === 'preflight' ? 'pf' : 'cs';
-  const get = kind === 'preflight' ? api.preflightGet : api.checksumGet;
-  const btn0 = $(`#${prefix}-cancel`, host);
-  if (btn0) btn0.disabled = false;
+  return new Promise((resolve) => {
+    const prefix = kind === 'preflight' ? 'pf' : 'cs';
+    const get = kind === 'preflight' ? api.preflightGet : api.checksumGet;
+    const btn0 = $(`#${prefix}-cancel`, host);
+    if (btn0) btn0.disabled = false;
 
-  const cancelTask = () => {
-    const cancel = kind === 'preflight' ? api.preflightCancel : api.checksumCancel;
-    cancel(id).catch(() => { /* already gone */ });
-    toast('สั่งยกเลิกแล้ว เดี๋ยวจะหยุดให้', 'info');
-  };
+    const cancelTask = () => {
+      const cancel = kind === 'preflight' ? api.preflightCancel : api.checksumCancel;
+      cancel(id).catch(() => { /* already gone */ });
+      toast('สั่งยกเลิกแล้ว เดี๋ยวจะหยุดให้', 'info');
+    };
 
-  const t = poll(async () => {
-    let task;
-    try { task = await get(id, false); } catch { return; }
-    // Re-query every tick: a step re-render swaps these nodes out, and writing
-    // to a detached one would silently freeze the progress bar.
-    const progressBox = $(`#${prefix}-progress`, host);
-    const cancelBtn = $(`#${prefix}-cancel`, host);
-    if (cancelBtn) cancelBtn.disabled = task.status !== 'running';
-    const p = task.progress || { done: 0, total: 0 };
-    const elapsed = Date.now() - new Date(task.createdAt).getTime();
-    if (task.status === 'running') {
-      setBusy(true, kind === 'preflight' ? 'กำลังตรวจข้อมูล' : 'กำลังเก็บ baseline', {
-        detail: `${p.total ? `${num(p.done)}/${num(p.total)} · ` : ''}ผ่านไป ${duration(elapsed)}`,
-        onCancel: cancelTask,
-      });
-    }
-    if (progressBox) {
-      progressBox.innerHTML = `
-        <div class="progress-wrap">
-          <span class="status-dot ${task.status === 'running' ? 'running' : task.status}"></span>
-          <div class="progress"><span data-width="${p.total ? (p.done / p.total) * 100 : 40}"></span></div>
-          <span class="hint nowrap">${task.status === 'running' ? `กำลังตรวจ ${duration(elapsed)}` : task.status}</span>
-        </div>`;
-      applyDynamicStyles(progressBox);
-    }
-    if (task.status === 'running') return;
+    const t = poll(async () => {
+      let task;
+      try { task = await get(id, false); } catch { return; }
+      // Re-query every tick: a step re-render swaps these nodes out, and writing
+      // to a detached one would silently freeze the progress bar.
+      const progressBox = $(`#${prefix}-progress`, host);
+      const cancelBtn = $(`#${prefix}-cancel`, host);
+      if (cancelBtn) cancelBtn.disabled = task.status !== 'running';
+      const p = task.progress || { done: 0, total: 0 };
+      const elapsed = Date.now() - new Date(task.createdAt).getTime();
+      if (task.status === 'running') {
+        setBusy(true, kind === 'preflight' ? 'กำลังตรวจข้อมูล' : 'กำลังเก็บ baseline', {
+          detail: `${p.total ? `${num(p.done)}/${num(p.total)} · ` : ''}ผ่านไป ${duration(elapsed)}`,
+          onCancel: cancelTask,
+        });
+      }
+      if (progressBox) {
+        progressBox.innerHTML = `
+          <div class="progress-wrap">
+            <span class="status-dot ${task.status === 'running' ? 'running' : task.status}"></span>
+            <div class="progress"><span data-width="${p.total ? (p.done / p.total) * 100 : 40}"></span></div>
+            <span class="hint nowrap">${task.status === 'running' ? `กำลังตรวจ ${duration(elapsed)}` : task.status}</span>
+          </div>`;
+        applyDynamicStyles(progressBox);
+      }
+      if (task.status === 'running') return;
 
-    stopPoll(t);
-    if (progressBox) progressBox.innerHTML = '';
-    const runBtn = $(`#${prefix}-run`, host);
-    if (runBtn) runBtn.disabled = false;
+      stopPoll(t);
+      if (progressBox) progressBox.innerHTML = '';
+      const runBtn = $(`#${prefix}-run`, host);
+      if (runBtn) runBtn.disabled = false;
 
-    if (task.status === 'failed') {
-      toast(`${kind === 'preflight' ? 'ตรวจไม่สำเร็จ' : 'ทำ checksum ไม่สำเร็จ'}: ${task.error}`, 'err', 9000);
-      return;
-    }
-    if (task.status === 'cancelled') { toast('ยกเลิกแล้ว', 'warn'); return; }
-    if (kind === 'preflight') await loadPreflight(host, id, true);
-    else await loadChecksum(host, id, true);
-  }, 1200, kind === 'preflight' ? 'กำลังตรวจข้อมูล' : 'กำลังเก็บ baseline');
+      if (task.status === 'failed') {
+        toast(`${kind === 'preflight' ? 'ตรวจไม่สำเร็จ' : 'ทำ checksum ไม่สำเร็จ'}: ${task.error}`, 'err', 9000);
+        resolve({ status: 'failed', error: task.error });
+        return;
+      }
+      if (task.status === 'cancelled') {
+        toast('ยกเลิกแล้ว', 'warn');
+        resolve({ status: 'cancelled' });
+        return;
+      }
+      // Resolve only after the loader has run: it is what writes the verdict
+      // into the store, and the runner reads the store the instant we resolve.
+      if (kind === 'preflight') await loadPreflight(host, id, true);
+      else await loadChecksum(host, id, true);
+      resolve({ status: 'done' });
+    }, 1200, kind === 'preflight' ? 'กำลังตรวจข้อมูล' : 'กำลังเก็บ baseline');
+  });
 }
 
 async function loadPreflight(host, id, announce = false) {
@@ -489,24 +725,33 @@ const strategyLabel = (s) => ({
   full: 'อ่านทั้งตาราง', pk_head: 'สุ่มดูแถวแรกๆ ตาม primary key', rowcount: 'นับแค่จำนวนแถว',
 }[s] || 'เลือกให้อัตโนมัติ');
 
+function baselineOptions(host) {
+  return {
+    strategy: $('#cs-strategy', host) ? $('#cs-strategy', host).value : 'auto',
+    mode: $('#cs-mode', host) ? $('#cs-mode', host).value : 'sha256',
+    deep: $('#cs-deep', host) ? $('#cs-deep', host).checked : false,
+  };
+}
+
+/** Start step 2 and resolve with its terminal status. See startPreflight. */
+async function startBaseline(host, opts) {
+  const btn = $('#cs-run', host);
+  if (btn) btn.disabled = true;
+  try {
+    const task = await api.checksum(tableBody(key, opts));
+    setTableState(key, { checksumId: task.id, checksumAt: task.createdAt, checksumOk: null, verifyId: null, verifyOk: null });
+    return await watchTask(host, 'checksum', task.id);
+  } catch (err) {
+    toast(err.message, 'err', 9000);
+    if (btn) btn.disabled = false;
+    return { status: 'failed', error: err.message };
+  }
+}
+
 function wireBaseline(host) {
   const btn = $('#cs-run', host);
   if (!btn) return;
-  btn.addEventListener('click', async () => {
-    btn.disabled = true;
-    try {
-      const task = await api.checksum(tableBody(key, {
-        strategy: $('#cs-strategy', host) ? $('#cs-strategy', host).value : 'auto',
-        mode: $('#cs-mode', host) ? $('#cs-mode', host).value : 'sha256',
-        deep: $('#cs-deep', host) ? $('#cs-deep', host).checked : false,
-      }));
-      setTableState(key, { checksumId: task.id, checksumAt: task.createdAt, checksumOk: null, verifyId: null, verifyOk: null });
-      watchTask(host, 'checksum', task.id);
-    } catch (err) {
-      toast(err.message, 'err', 9000);
-      btn.disabled = false;
-    }
-  });
+  btn.addEventListener('click', () => startBaseline(host, baselineOptions(host)));
   const cancel = $('#cs-cancel', host);
   if (cancel) {
     cancel.addEventListener('click', async () => {
@@ -893,34 +1138,56 @@ function wirePlan(host) {
   }
   applyDefaults();
 
-  btn.addEventListener('click', async () => {
-    btn.disabled = true;
-    $('#pl-status', host).textContent = 'กำลังสร้างคำสั่ง…';
+  btn.addEventListener('click', () => {
     const m = mode.value;
-    try {
-      const { planId, plan } = await api.plan(tableBody(key, {
-        // Converting nothing is a real answer, not a missing one: an empty
-        // column list is exactly what reduces the plan to the metadata-only
-        // pair of ALTERs that the "defaults" mode promises.
-        strategy: m === 'table' ? 'convert_table' : 'modify_columns',
-        columns: m === 'columns' ? picked() : m === 'defaults' ? [] : undefined,
-        backupStrategy: m === 'defaults' ? 'none' : $('#pl-backup', host).value,
-        includeSchemaDefaults: $('#pl-schemadef', host).checked,
-        includeTableDefaults: true,
-        order: 'size_asc',
-      }));
-      setTableState(key, { planId, planAt: new Date().toISOString(), jobId: null, jobStatus: null });
-      cache('plan', planId, plan);
-      redraw();
-      toast(`สร้างให้แล้ว ${plan.steps.length} คำสั่ง`, 'ok');
-    } catch (err) {
-      toast(err.message, 'err', 9000);
-    } finally {
-      btn.disabled = false;
-      const s = $('#pl-status', host);
-      if (s) s.textContent = '';
-    }
+    startPlan(host, {
+      // Converting nothing is a real answer, not a missing one: an empty
+      // column list is exactly what reduces the plan to the metadata-only
+      // pair of ALTERs that the "defaults" mode promises.
+      strategy: m === 'table' ? 'convert_table' : 'modify_columns',
+      columns: m === 'columns' ? picked() : m === 'defaults' ? [] : undefined,
+      backupStrategy: m === 'defaults' ? 'none' : $('#pl-backup', host).value,
+      includeSchemaDefaults: $('#pl-schemadef', host).checked,
+      includeTableDefaults: true,
+      order: 'size_asc',
+    });
   });
+}
+
+/**
+ * The column list the "ที่แนะนำ" button would tick, computed without it.
+ *
+ * Same predicate the picker uses (`columnSafety().tick`), so the automated run
+ * converts exactly the set an operator would see pre-ticked - no more. It reads
+ * the scan out of the store, so it is only meaningful once step 1 has landed.
+ */
+function recommendedColumns() {
+  return detail.pendingColumns.filter((c) => columnSafety(c).tick).map((c) => c.columnName);
+}
+
+/** Build the plan and resolve with it, or with null when the request failed. */
+async function startPlan(host, body) {
+  const btn = $('#pl-build', host);
+  const status = $('#pl-status', host);
+  if (btn) btn.disabled = true;
+  if (status) status.textContent = 'กำลังสร้างคำสั่ง…';
+  try {
+    const { planId, plan } = await api.plan(tableBody(key, body));
+    setTableState(key, { planId, planAt: new Date().toISOString(), jobId: null, jobStatus: null });
+    cache('plan', planId, plan);
+    redraw();
+    toast(`สร้างให้แล้ว ${plan.steps.length} คำสั่ง`, 'ok');
+    return { planId, plan };
+  } catch (err) {
+    toast(err.message, 'err', 9000);
+    return null;
+  } finally {
+    // Re-queried: redraw() above swaps these nodes out from under us.
+    const b = $('#pl-build', host);
+    if (b) b.disabled = false;
+    const s = $('#pl-status', host);
+    if (s) s.textContent = '';
+  }
 }
 
 /**
@@ -1042,18 +1309,35 @@ function wireRun(host) {
   if (open) open.addEventListener('click', () => navigate('jobs', { jobId: tableState(key).jobId }));
 }
 
-async function startRun(host, dryRun) {
+/**
+ * @param {object}  opts
+ * @param {boolean} opts.auto  the run was authorised once, up front, by the
+ *   one-button runner. It suppresses the per-run dialog - but ONLY for the
+ *   plain `RUN` case. The two situations that escalate the dialog to `FORCE`
+ *   are refused outright below rather than waved through: the runner is
+ *   supposed to have stopped long before here, and if it ever does not, the
+ *   answer is still no.
+ * @returns {Promise<string|null>} the job's terminal status, or null when
+ *   nothing was started.
+ */
+async function startRun(host, dryRun, { auto = false } = {}) {
   const st = tableState(key);
   let plan;
-  try { plan = await fetchPlan(st.planId); } catch (err) { toast(err.message, 'err'); return; }
-  if (!plan) { toast('ยังไม่ได้สร้างคำสั่ง', 'warn'); return; }
+  try { plan = await fetchPlan(st.planId); } catch (err) { toast(err.message, 'err'); return null; }
+  if (!plan) { toast('ยังไม่ได้สร้างคำสั่ง', 'warn'); return null; }
 
   // A preflight that skipped the table proves nothing. The server refuses the
   // run in that case unless the caller acknowledges it, so ask here rather
   // than letting the operator hit a 412 they cannot interpret.
   const unscanned = st.preflightScanned === false;
+  const needsForce = st.preflightGate === 'block' || unscanned;
 
-  if (!dryRun) {
+  if (auto && !dryRun && needsForce) {
+    toast('หยุดไว้ก่อน: ตารางนี้ต้องยืนยันด้วยการพิมพ์ FORCE จึงรันอัตโนมัติให้ไม่ได้', 'err', 12000);
+    return null;
+  }
+
+  if (!dryRun && !auto) {
     const ok = await confirmDialog({
       title: `รันจริงกับตาราง ${key}`,
       body: `
@@ -1069,7 +1353,7 @@ async function startRun(host, dryRun) {
       danger: true,
       requireText: st.preflightGate === 'block' || unscanned ? 'FORCE' : 'RUN',
     });
-    if (!ok) return;
+    if (!ok) return null;
   }
 
   const payload = {
@@ -1091,37 +1375,42 @@ async function startRun(host, dryRun) {
     const job = await api.jobRun(payload);
     if (!dryRun) setTableState(key, { jobId: job.id, jobStatus: job.status });
     else setTableState(key, { jobId: job.id, jobStatus: null });
-    watchJob(host, job.id, dryRun);
+    return await watchJob(host, job.id, dryRun);
   } catch (err) {
     toast(err.message, 'err', 10000);
+    return null;
   }
 }
 
+/** Resolves with the job's terminal status. See watchTask for why. */
 function watchJob(host, id, dryRun = false) {
-  const t = poll(async () => {
-    let job;
-    try { job = await api.job(id); } catch { return; }
-    renderJob(host, job, dryRun);
-    // A paused job is executing nothing, so the page need not be held - and
-    // holding it would trap the operator on a page that is waiting for them.
-    const p = job.progress || {};
-    setBusy(job.status === 'running' || job.status === 'rolling_back', runLabel(dryRun), {
-      detail: `ขั้น ${num(p.doneSteps)}/${num(p.totalSteps)} · ${esc(pct(p.pct))}`,
-      cancelText: 'หยุดงาน',
-      onCancel: () => {
-        api.jobCancel(job.id).catch(() => { /* already finishing */ });
-        toast('สั่งหยุดแล้ว ขั้นที่กำลังรันจะทำต่อจนจบก่อน', 'warn', 9000);
-      },
-    });
-    if (['done', 'failed', 'cancelled', 'rolled_back'].includes(job.status)) {
-      stopPoll(t);
-      if (!dryRun) setTableState(key, { jobStatus: job.status });
-      toast(job.status === 'done'
-        ? (dryRun ? 'ลองรันเสร็จแล้ว' : 'รันเสร็จแล้ว')
-        : `งานจบแบบ ${job.status}`, job.status === 'done' ? 'ok' : 'err');
-      if (!dryRun) redraw();
-    }
-  }, 1200, runLabel(dryRun));
+  return new Promise((resolve) => {
+    const t = poll(async () => {
+      let job;
+      try { job = await api.job(id); } catch { return; }
+      renderJob(host, job, dryRun);
+      // A paused job is executing nothing, so the page need not be held - and
+      // holding it would trap the operator on a page that is waiting for them.
+      const p = job.progress || {};
+      setBusy(job.status === 'running' || job.status === 'rolling_back', runLabel(dryRun), {
+        detail: `ขั้น ${num(p.doneSteps)}/${num(p.totalSteps)} · ${esc(pct(p.pct))}`,
+        cancelText: 'หยุดงาน',
+        onCancel: () => {
+          api.jobCancel(job.id).catch(() => { /* already finishing */ });
+          toast('สั่งหยุดแล้ว ขั้นที่กำลังรันจะทำต่อจนจบก่อน', 'warn', 9000);
+        },
+      });
+      if (['done', 'failed', 'cancelled', 'rolled_back'].includes(job.status)) {
+        stopPoll(t);
+        if (!dryRun) setTableState(key, { jobStatus: job.status });
+        toast(job.status === 'done'
+          ? (dryRun ? 'ลองรันเสร็จแล้ว' : 'รันเสร็จแล้ว')
+          : `งานจบแบบ ${job.status}`, job.status === 'done' ? 'ok' : 'err');
+        if (!dryRun) redraw();
+        resolve(job.status);
+      }
+    }, 1200, runLabel(dryRun));
+  });
 }
 
 const runLabel = (dryRun) => (dryRun ? 'กำลังลองรัน' : 'กำลังแปลงตาราง');
@@ -1206,40 +1495,52 @@ function stepVerify(st, at) {
   });
 }
 
+/** Start step 5 and resolve with its terminal status. See startPreflight. */
+async function startVerify(host) {
+  const st = tableState(key);
+  const btn = $('#vf-run', host);
+  if (btn) btn.disabled = true;
+  let task;
+  try {
+    task = await api.checksumVerify(st.checksumId, {});
+  } catch (err) {
+    toast(err.message, 'err', 9000);
+    if (btn) btn.disabled = false;
+    return { status: 'failed', error: err.message };
+  }
+  setTableState(key, { verifyId: task.id, verifyOk: null });
+  return new Promise((resolve) => {
+    const t = poll(async () => {
+      let x;
+      try { x = await api.checksumGet(task.id, false); } catch { return; }
+      const box = $('#vf-progress', host);
+      if (box) {
+        box.innerHTML = `<div class="progress-wrap"><span class="status-dot ${x.status === 'running' ? 'running' : x.status}"></span>
+          <span class="hint">${x.status === 'running' ? 'กำลังคำนวณ' : x.status}</span></div>`;
+      }
+      if (x.status === 'running') return;
+      stopPoll(t);
+      if (box) box.innerHTML = '';
+      const b = $('#vf-run', host);
+      if (b) b.disabled = false;
+      // Same ordering rule as watchTask: the verdict reaches the store inside
+      // loadVerify, so resolve after it, not before.
+      await loadVerify(host, task.id, true);
+      resolve({ status: x.status });
+    }, 1200, 'กำลังเทียบกับ baseline');
+    setBusy(true, 'กำลังเทียบกับ baseline', {
+      onCancel: () => {
+        api.checksumCancel(task.id).catch(() => { /* already gone */ });
+        toast('สั่งยกเลิกแล้ว', 'info');
+      },
+    });
+  });
+}
+
 function wireVerify(host) {
   const btn = $('#vf-run', host);
   if (!btn) return;
-  btn.addEventListener('click', async () => {
-    const st = tableState(key);
-    btn.disabled = true;
-    try {
-      const task = await api.checksumVerify(st.checksumId, {});
-      setTableState(key, { verifyId: task.id, verifyOk: null });
-      const t = poll(async () => {
-        let x;
-        try { x = await api.checksumGet(task.id, false); } catch { return; }
-        const box = $('#vf-progress', host);
-        if (box) {
-          box.innerHTML = `<div class="progress-wrap"><span class="status-dot ${x.status === 'running' ? 'running' : x.status}"></span>
-            <span class="hint">${x.status === 'running' ? 'กำลังคำนวณ' : x.status}</span></div>`;
-        }
-        if (x.status === 'running') return;
-        stopPoll(t);
-        if (box) box.innerHTML = '';
-        btn.disabled = false;
-        loadVerify(host, task.id, true);
-      }, 1200, 'กำลังเทียบกับ baseline');
-      setBusy(true, 'กำลังเทียบกับ baseline', {
-        onCancel: () => {
-          api.checksumCancel(task.id).catch(() => { /* already gone */ });
-          toast('สั่งยกเลิกแล้ว', 'info');
-        },
-      });
-    } catch (err) {
-      toast(err.message, 'err', 9000);
-      btn.disabled = false;
-    }
-  });
+  btn.addEventListener('click', () => startVerify(host));
 }
 
 async function loadVerify(host, id, announce = false) {

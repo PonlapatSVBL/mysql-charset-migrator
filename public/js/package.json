@@ -1,0 +1,4 @@
+{
+  "_why": "Not a package. This marks public/js as ES modules, which is what the browser already loads them as. Without it Node warns on every `npm run selftest`, because the autorun policy test imports autorun.js directly from a CommonJS file. Scoped to this directory so the CommonJS server code is untouched.",
+  "type": "module"
+}

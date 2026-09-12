@@ -1108,3 +1108,59 @@ details.stepcard.warn { border-color: var(--e-warn); }
 
 /* Rows that stand in for a "ดู" button: the whole row is the target. */
 tbody tr[data-job], tbody tr[data-idx] { cursor: pointer; }
+
+/* ------------------------------------------------------------------ autorun
+   The one-button run's progress panel. It reuses the step badge shape so the
+   six rows read as the same five steps below them, just collapsed into a
+   checklist that can be watched without scrolling. */
+.autorun { border-color: var(--e-warn); }
+.autorun.running { border-color: var(--accent); }
+
+/* While a phase is in flight the busy backdrop covers the page, and "stop after
+   this phase" is the one control that has to stay reachable underneath it -
+   otherwise the only way out is the backdrop's own cancel, which aborts the
+   running task instead of letting it finish.
+
+   Two things are needed for that, and both live here rather than on .autorun:
+   the z-index has to beat the backdrop (70) while staying under the busy modal
+   (80), and `sticky` only spans the scroll range when it sits on a direct child
+   of the scroller - which #tw-auto is and the card inside it is not. The panel
+   starts nothing, it only stops things, which is why it is the one exception to
+   the page lock. */
+.autorun-dock.running {
+  position: sticky;
+  top: 0;
+  z-index: 75;
+}
+
+.auto-list {
+  list-style: none; margin: .75rem 0 0; padding: 0;
+  display: flex; flex-direction: column; gap: .35rem;
+}
+
+.auto-row {
+  display: flex; align-items: center; gap: .6rem;
+  padding: .3rem .1rem;
+  color: var(--fg-mute);
+}
+.auto-row .auto-label { flex: 1 1 auto; min-width: 0; }
+.auto-row.done, .auto-row.running, .auto-row.stopped { color: var(--fg); }
+
+.auto-dot {
+  flex: none; width: 20px; height: 20px; border-radius: 50%;
+  display: grid; place-items: center;
+  font-family: var(--mono); font-size: var(--t-mini); font-weight: 700; line-height: 1;
+  background: var(--bg-3); border: 1px solid var(--line); color: var(--fg-mute);
+}
+.auto-row.done    .auto-dot { background: var(--ok-solid); border-color: var(--ok-solid); color: var(--accent-ink); }
+.auto-row.running .auto-dot { background: var(--accent-dim); border-color: var(--accent); color: var(--accent-hi); }
+.auto-row.stopped .auto-dot { background: var(--crit); border-color: var(--crit); color: var(--accent-ink); }
+
+/* The running row is the only thing on the page that is still moving, so it
+   is the only thing allowed to pulse. */
+.auto-row.running .auto-dot { animation: auto-pulse 1.2s ease-in-out infinite; }
+@keyframes auto-pulse { 50% { opacity: .45; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .auto-row.running .auto-dot { animation: none; }
+}
