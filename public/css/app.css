@@ -570,7 +570,11 @@ label.check input { width: auto; accent-color: var(--accent); }
    max-width stops the type growing on a wide monitor, a min-width plus a
    scroll stops it collapsing on a phone. Charts without text (the donut, the
    in-table mini bars) size themselves and never come through here. */
-.chart-scroll { overflow-x: auto; overflow-y: hidden; max-width: 1180px; }
+/* Centred, not just capped. Left-aligned, the cap left the two chart cards
+   stopping short of the card's right edge while every table and note beside
+   them ran its full width - which reads as the card being crooked rather than
+   as the type being deliberately bounded. */
+.chart-scroll { overflow-x: auto; overflow-y: hidden; max-width: 1180px; margin-inline: auto; }
 .chart-scroll > .chart { min-width: 620px; }
 .chart-fig { margin: 0; }
 .chart-fig figcaption {
@@ -1014,7 +1018,9 @@ details.explain > summary:hover { color: var(--fg); }
    states the size of the job, the chart says which tables it is made of, and
    splitting them across two cards made you scroll between a claim and its
    evidence. */
-.cta + .chart-treemap { margin-top: var(--s4); }
+/* The treemap is wrapped in .chart-scroll, so the old `.cta + .chart-treemap`
+   never matched anything and the chart sat flush against the headline. */
+.cta + .chart-scroll { margin-top: var(--s4); }
 
 /* ------------------------------------------------------------- step cards
    The whole workflow is one column of these. A locked step is visibly inert,

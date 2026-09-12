@@ -130,6 +130,18 @@ function squarify(values, x, y, w, h) {
  * table counts would draw a 40 GB table the same size as an empty one, which
  * is exactly the mistake this chart exists to stop.
  */
+/**
+ * Labels are clipped to their cell, never squeezed into it.
+ *
+ * They used to carry textLength with lengthAdjust="spacingAndGlyphs" against a
+ * flat 7.2px-per-character guess, which asks the renderer to stretch or squash
+ * the glyphs themselves to hit a width that was only ever an estimate. Real
+ * type is not 7.2px a character in any font, so essentially every label came
+ * out deformed - wide where the name was short, cramped where it was long.
+ * A clip path cuts at the cell edge instead, and the letters keep their shape.
+ */
+let treemapSeq = 0;
+
 export function treemap(items, { height = 340, max = 40, unit = 'bytes' } = {}) {
   const W = 1000;
   const kept = items.filter((i) => Number(i.value) > 0).slice(0, max);
@@ -137,6 +149,11 @@ export function treemap(items, { height = 340, max = 40, unit = 'bytes' } = {}) 
   const fmt = unit === 'bytes' ? bytes : num;
   const boxes = squarify(kept.map((i) => i.value), 0, 0, W, height);
   const total = kept.reduce((a, i) => a + Number(i.value), 0);
+
+  // Ids have to survive two treemaps on one page, which the overview does not
+  // do today and should not have to think about if it ever does.
+  const gid = `tm${treemapSeq++}`;
+  const clips = [];
 
   const cells = kept.map((it, i) => {
     const b = boxes[i];
@@ -146,17 +163,23 @@ export function treemap(items, { height = 340, max = 40, unit = 'bytes' } = {}) 
     // Text only where it fits; a clipped label reads worse than no label.
     const showName = b.w > 74 && b.h > 28;
     const showSize = b.w > 74 && b.h > 46;
+    const clip = `${gid}-${i}`;
+    if (showName || showSize) {
+      clips.push(`<clipPath id="${clip}"><rect x="${round(b.x)}" y="${round(b.y)}"
+        width="${round(b.w - 6)}" height="${round(b.h)}"/></clipPath>`);
+    }
     return `<g class="tm-cell tm-${it.kind || 'pending'}" tabindex="0" role="button"
         data-open="${esc(it.key)}" aria-label="${esc(it.key)} ${esc(fmt(it.value))}">
       <title>${esc(it.key)} — ${esc(fmt(it.value))} (${esc(pct(share))} ของที่เหลือ)</title>
       <rect x="${round(b.x)}" y="${round(b.y)}" width="${round(b.w)}" height="${round(b.h)}" rx="4"/>
-      ${showName ? `<text class="tm-name" x="${round(b.x + 10)}" y="${round(b.y + 20)}"
-        textLength="${round(Math.min(label.length * 7.2, b.w - 20))}" lengthAdjust="spacingAndGlyphs">${esc(label)}</text>` : ''}
-      ${showSize ? `<text class="tm-val" x="${round(b.x + 10)}" y="${round(b.y + 37)}">${esc(fmt(it.value))}</text>` : ''}
+      ${showName || showSize ? `<g clip-path="url(#${clip})">
+        ${showName ? `<text class="tm-name" x="${round(b.x + 10)}" y="${round(b.y + 20)}">${esc(label)}</text>` : ''}
+        ${showSize ? `<text class="tm-val" x="${round(b.x + 10)}" y="${round(b.y + 37)}">${esc(fmt(it.value))}</text>` : ''}
+      </g>` : ''}
     </g>`;
   }).join('');
 
-  return scroller(frame(W, height, cells, 'chart-treemap'));
+  return scroller(frame(W, height, `<defs>${clips.join('')}</defs>${cells}`, 'chart-treemap'));
 }
 
 /* ----------------------------------------------------------------- donut */
@@ -205,12 +228,6 @@ export function donutLegend(slices) {
 
 /* ------------------------------------------------------------ mini stack */
 
-/**
- * One row of a small-multiples bar chart: done and pending on a scale shared
- * with every other row in the table, so bar length means size rather than
- * percentage. A per-row percentage bar draws a 4 GB schema and a 4 MB one
- * exactly the same.
- */
 /**
  * A two-segment completion bar: what is done, then what is left, together
  * filling the rail whatever the row's totals are.
