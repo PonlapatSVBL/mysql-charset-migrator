@@ -423,13 +423,17 @@ Referencing column 'external_training_request_id' and referenced column
 'fk_training_attachment' are incompatible.
 ```
 
-**การสลับลำดับไม่ช่วย** ไม่ว่าจะแปลง parent หรือ child ก่อน ก็ต้องผ่านสถานะที่สองฝั่งไม่ตรงกันเหมือนกัน
-ทางออกมีสองทางเท่านั้น:
+**สองอย่างที่ดูเหมือนจะช่วยแต่ไม่ช่วย:**
 
-1. ติ๊ก **“ปิด FOREIGN_KEY_CHECKS ระหว่างรัน”** (ตัวเลือกขั้นสูงของขั้น 3) แล้วแปลงทั้งสองฝั่งให้ครบ —
-   `SET SESSION foreign_key_checks = 0` ทำให้ MySQL ยอมรับสถานะกลางทาง แต่ถ้าแปลงไม่ครบทั้งสองฝั่ง
-   จะเหลือ constraint ที่สองฝั่งคนละ charset ค้างไว้ ซึ่งจะไปโผล่เป็นปัญหาใน DDL ครั้งถัดไป
-2. `DROP FOREIGN KEY` ทิ้งก่อน แปลงทั้งสองฝั่ง แล้ว `ADD CONSTRAINT` กลับ
+- *สลับลำดับ* — ไม่ว่าจะแปลง parent หรือ child ก่อน ก็ต้องผ่านสถานะที่สองฝั่งไม่ตรงกันเหมือนกัน
+- *`SET foreign_key_checks = 0`* — ตัวแปรนี้ปิดการตรวจระดับแถวและปล่อยให้ DDL ข้ามลำดับ dependency ได้
+  แต่ MySQL **ยกเว้นกรณีนี้ไว้ตรงๆ**: `ALTER TABLE` ที่ทำให้นิยามคอลัมน์ของ foreign key ไม่เข้ากัน
+  จะถูกปฏิเสธไม่ว่าตั้งค่านี้ไว้เท่าไร
+
+ทางเดียวที่ได้ผลคือ **ถอด constraint ออกก่อน → แปลงทั้งสองฝั่ง → ใส่กลับ** เครื่องมือจึงเขียนคำสั่งชุดนี้
+ให้เสร็จในหน้าแผน (กดคัดลอกได้) แทนที่จะอธิบายให้ไปพิมพ์เอง — เพราะมันอ้างชื่อ constraint จริง
+คอลัมน์ทั้งสองฝั่งพร้อมนิยามครบทุก field (`NOT NULL`, `DEFAULT`, comment) และกฎ `ON DELETE` / `ON UPDATE`
+เดิม ซึ่งถ้าพิมพ์เองตกไปสักอย่างจะกลายเป็นบั๊กข้อมูล ไม่ใช่แค่พิมพ์ผิด
 
 เครื่องมือนี้ดึง charset/collation ของ **ทั้งสองฝั่ง** มาตอนสร้างแผน (`queries.tablesForPlan` join
 `information_schema.COLUMNS` สองครั้ง) จึงบอกได้ก่อนรันว่าคำสั่งนี้จะถูกปฏิเสธหรือไม่ ไม่ใช่เตือนลอยๆ ว่า
@@ -509,7 +513,7 @@ PK ที่เป็น text จะถูก **จัดลำดับให�
 | `unique_collation` | warn | มีคอลัมน์ `UNI` หรือ UNIQUE index ครอบคอลัมน์ที่จะเปลี่ยน collation |
 | `partitioned` | warn | ตารางมี partition (ALTER จะ rebuild ทุก partition) |
 | `fulltext` | warn | มี FULLTEXT index (สร้างใหม่หมด ผลค้นหาอาจเปลี่ยนตาม collation) |
-| `fk_charset_mismatch` | **critical** | คอลัมน์ที่จะแปลงเป็นปลายข้างหนึ่งของ foreign key ที่อีกฝั่งยังเป็น charset เดิม — MySQL จะปฏิเสธด้วย `are incompatible` ข้อความบอกชื่อ constraint และตาราง/คอลัมน์อีกฝั่งให้ |
+| `fk_charset_mismatch` | **critical** | คอลัมน์ที่จะแปลงเป็นปลายข้างหนึ่งของ foreign key ที่อีกฝั่งยังเป็น charset เดิม — MySQL จะปฏิเสธด้วย `are incompatible` risk นี้แนบ `repair[]` ซึ่งเป็นสคริปต์ DROP/MODIFY×2/ADD ที่รันได้เลย |
 | `fk_partner_unknown` | warn | อ่าน charset ของอีกฝั่งไม่ได้ (มักเพราะ user มองไม่เห็น schema นั้น) — ยังไม่รู้ว่าจะผ่านหรือไม่ |
 | `fk_text_columns` | info | มี foreign key บนคอลัมน์ข้อความ แต่อีกฝั่งเป็น target อยู่แล้ว รอบนี้จะทำให้ตรงกันพอดี |
 | `generated_columns` | warn | มี generated column ที่เป็นข้อความในชุดที่จะเปลี่ยน |

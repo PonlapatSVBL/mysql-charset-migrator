@@ -608,10 +608,6 @@ function stepPlan(st, at) {
               <option value="table_copy">ก๊อปตารางไว้ในฐานข้อมูล (ย้อนกลับเร็วสุด)</option>
               <option value="mysqldump">mysqldump ลงไฟล์</option>
             </select></label>
-          <div class="field"><span>&nbsp;</span>
-            <label class="check"><input type="checkbox" id="pl-fkchecks">
-              ปิด FOREIGN_KEY_CHECKS ระหว่างรัน จำเป็นเมื่อคอลัมน์ที่แปลงมี foreign key</label>
-          </div>
         </div>`)}</div>
       <div class="row-tight">
         <button class="btn-primary" id="pl-build">${st.planId ? 'สร้างใหม่' : 'สร้างคำสั่ง'}</button>
@@ -909,9 +905,6 @@ function wirePlan(host) {
         strategy: m === 'table' ? 'convert_table' : 'modify_columns',
         columns: m === 'columns' ? picked() : m === 'defaults' ? [] : undefined,
         backupStrategy: m === 'defaults' ? 'none' : $('#pl-backup', host).value,
-        // Two ends of a text foreign key cannot both be right at once, so
-        // MySQL has to be told to stop looking while they are brought across.
-        disableFkChecks: $('#pl-fkchecks', host).checked,
         includeSchemaDefaults: $('#pl-schemadef', host).checked,
         includeTableDefaults: true,
         order: 'size_asc',
@@ -928,6 +921,22 @@ function wirePlan(host) {
       if (s) s.textContent = '';
     }
   });
+}
+
+/**
+ * The ready-to-run fix attached to a risk, when there is one.
+ *
+ * Printed in full rather than summarised: it names a constraint, two tables and
+ * two column definitions that all have to match what is already in the
+ * database, and an operator retyping any of that from a description is how a
+ * NOT NULL or a DEFAULT goes missing.
+ */
+function repairScript(risk) {
+  if (!risk.repair || !risk.repair.length) return '';
+  return risk.repair.map((r, i) => `
+    <div class="row-tight"><strong class="hint">คำสั่งแก้ ${esc(r.constraint)}</strong>
+      <button class="btn-sm btn-ghost" data-copy-repair="${esc(risk.code)}-${i}">คัดลอก</button></div>
+    <pre class="sql" id="repair-${esc(risk.code)}-${i}">${esc(r.sql)}</pre>`).join('');
 }
 
 async function loadPlan(host, planId) {
@@ -953,7 +962,7 @@ async function loadPlan(host, planId) {
           <span class="step-title">${i + 1}. ${esc(s.title)}</span>
           ${s.metadataOnly ? chip('metadata only', 'chip-ok') : chip(bytes(s.estimate.bytes))}</summary>
         <div class="step-body">
-          ${s.risks.map((r) => note(levelKind(r.level), r.code, esc(r.message))).join('')}
+          ${s.risks.map((r) => note(levelKind(r.level), r.code, esc(r.message) + repairScript(r))).join('')}
           <div class="row-tight"><strong class="hint">FORWARD</strong>
             <button class="btn-sm btn-ghost" data-copy="${i}">คัดลอก</button></div>
           <pre class="sql">${esc(s.sql)}</pre>
@@ -969,6 +978,13 @@ async function loadPlan(host, planId) {
     </div>`;
   for (const b of $$('[data-copy]', box)) {
     b.addEventListener('click', (e) => { e.preventDefault(); copyToClipboard(plan.steps[Number(b.dataset.copy)].sql); });
+  }
+  for (const b of $$('[data-copy-repair]', box)) {
+    b.addEventListener('click', (e) => {
+      e.preventDefault();
+      const pre = $(`#repair-${b.dataset.copyRepair}`, box);
+      if (pre) copyToClipboard(pre.textContent);
+    });
   }
   $('#pl-dl', box).addEventListener('click', async () => {
     try {

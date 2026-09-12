@@ -522,11 +522,22 @@ async function tablesForPlan(pool, opts) {
     `SELECT k.CONSTRAINT_NAME AS name, k.TABLE_SCHEMA AS schemaName, k.TABLE_NAME AS tableName,
             k.COLUMN_NAME AS columnName, k.REFERENCED_TABLE_SCHEMA AS refSchema,
             k.REFERENCED_TABLE_NAME AS refTable, k.REFERENCED_COLUMN_NAME AS refColumn,
+            k.ORDINAL_POSITION AS ordinal,
+            rc.DELETE_RULE AS deleteRule, rc.UPDATE_RULE AS updateRule,
             cc.CHARACTER_SET_NAME AS childCharset, cc.COLLATION_NAME AS childCollation,
-            cc.COLUMN_TYPE AS childType,
+            cc.COLUMN_TYPE AS childType, cc.DATA_TYPE AS childDataType,
+            cc.IS_NULLABLE AS childNullable, cc.COLUMN_DEFAULT AS childDefault,
+            cc.EXTRA AS childExtra, cc.COLUMN_COMMENT AS childComment,
+            cc.GENERATION_EXPRESSION AS childGeneration,
             pc.CHARACTER_SET_NAME AS parentCharset, pc.COLLATION_NAME AS parentCollation,
-            pc.COLUMN_TYPE AS parentType
+            pc.COLUMN_TYPE AS parentType, pc.DATA_TYPE AS parentDataType,
+            pc.IS_NULLABLE AS parentNullable, pc.COLUMN_DEFAULT AS parentDefault,
+            pc.EXTRA AS parentExtra, pc.COLUMN_COMMENT AS parentComment,
+            pc.GENERATION_EXPRESSION AS parentGeneration
        FROM information_schema.KEY_COLUMN_USAGE k
+       LEFT JOIN information_schema.REFERENTIAL_CONSTRAINTS rc
+         ON rc.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA AND rc.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+        AND rc.TABLE_NAME = k.TABLE_NAME
        LEFT JOIN information_schema.COLUMNS cc
          ON cc.TABLE_SCHEMA = k.TABLE_SCHEMA AND cc.TABLE_NAME = k.TABLE_NAME
         AND cc.COLUMN_NAME = k.COLUMN_NAME
@@ -535,7 +546,8 @@ async function tablesForPlan(pool, opts) {
         AND pc.COLUMN_NAME = k.REFERENCED_COLUMN_NAME
       WHERE k.REFERENCED_TABLE_NAME IS NOT NULL
         AND (CONCAT(k.TABLE_SCHEMA,'.',k.TABLE_NAME) IN (${keyPh})
-          OR CONCAT(k.REFERENCED_TABLE_SCHEMA,'.',k.REFERENCED_TABLE_NAME) IN (${keyPh}))`,
+          OR CONCAT(k.REFERENCED_TABLE_SCHEMA,'.',k.REFERENCED_TABLE_NAME) IN (${keyPh}))
+      ORDER BY k.CONSTRAINT_SCHEMA, k.CONSTRAINT_NAME, k.ORDINAL_POSITION`,
     [...keys, ...keys]
   );
 

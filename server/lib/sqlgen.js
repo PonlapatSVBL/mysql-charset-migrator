@@ -171,16 +171,20 @@ function impossibleDdlRisk(options) {
  *
  * and charset is part of "compatible". Converting one side alone therefore
  * fails outright - and so does converting the other side first, since either
- * order passes through the same mismatched intermediate state. There is no
- * ordering that avoids it; the only ways through are to convert both ends
- * while foreign_key_checks is off, or to drop the constraint and rebuild it
- * afterwards.
+ * order passes through the same mismatched intermediate state.
  *
- * This used to be one blanket warning on every text FK, which said "convert
- * both together or turn FOREIGN_KEY_CHECKS off" without knowing whether
- * anything was actually wrong - and pointed at an option the UI never offered.
- * Now the counterpart's own charset decides: an ALTER that will be rejected is
- * critical and names the table to convert with it.
+ * `SET foreign_key_checks = 0` does NOT get past it. That variable turns off
+ * row-level checking and lets DDL ignore dependency order, but the manual
+ * carves this case out explicitly: an ALTER TABLE that would leave an
+ * incompatible FOREIGN KEY column definition is refused whatever it is set to.
+ * This module recommended it once; the operator tried it and got the same
+ * error back, which is the only evidence that matters.
+ *
+ * What does work is taking the constraint out of the way: DROP FOREIGN KEY,
+ * convert both columns, ADD CONSTRAINT again. So rather than describing that,
+ * foreignKeyRepair() writes it out - the real constraint name, both column
+ * definitions carried over field for field, and the original ON DELETE / ON
+ * UPDATE rules restored.
  */
 function foreignKeyRisks(table, target, changing, options = {}) {
   const risks = [];
@@ -223,17 +227,15 @@ function foreignKeyRisks(table, target, changing, options = {}) {
     risks.push({
       level: 'critical',
       code: 'fk_charset_mismatch',
-      message: options.disableFkChecks
-        ? `คำสั่งนี้จะทำให้สองฝั่งของ foreign key เป็นคนละ charset ชั่วคราว (${lines}) `
-          + 'แผนนี้ปิด FOREIGN_KEY_CHECKS ไว้แล้ว MySQL จึงยอมให้ผ่าน แต่ต้องแปลงอีกฝั่งให้เป็น '
-          + `${target.charset} / ${target.collation} ด้วย ไม่งั้นจะเหลือ constraint ที่สองฝั่งไม่ตรงกันค้างไว้`
-        : `MySQL จะปฏิเสธคำสั่งนี้ทันที ด้วย "are incompatible" เพราะอีกฝั่งของ foreign key ยังเป็น charset เดิม (${lines}) `
-          + 'การสลับลำดับไม่ช่วย เพราะไม่ว่าจะแปลงฝั่งไหนก่อนก็ผ่านสถานะที่สองฝั่งไม่ตรงกันเหมือนกัน — '
-          + 'ให้เปิด "ปิด FOREIGN_KEY_CHECKS ระหว่างรัน" ในตัวเลือกขั้นสูง แล้วแปลงอีกฝั่งให้ครบในรอบเดียวกัน '
-          + 'หรือ drop constraint ทิ้งก่อนแล้วสร้างใหม่หลังแปลงเสร็จ',
+      message: `MySQL จะปฏิเสธคำสั่งนี้ด้วย "are incompatible" เพราะอีกฝั่งของ foreign key ยังเป็น charset เดิม (${lines}) `
+        + 'การสลับลำดับไม่ช่วย เพราะไม่ว่าจะแปลงฝั่งไหนก่อนก็ผ่านสถานะที่สองฝั่งไม่ตรงกันเหมือนกัน '
+        + 'และ SET foreign_key_checks = 0 ก็ไม่ช่วย — MySQL ยกเว้นกรณีนี้ไว้ตรงๆ ว่า ALTER TABLE '
+        + 'ที่ทำให้นิยามคอลัมน์ของ foreign key ไม่เข้ากันจะถูกปฏิเสธไม่ว่าตั้งค่านี้ไว้เท่าไร '
+        + 'ทางเดียวคือถอด constraint ออกก่อน แปลงทั้งสองฝั่ง แล้วใส่กลับ — คำสั่งเต็มอยู่ข้างล่าง',
       columns: blocked.map((b) => b.column),
       constraints: [...new Set(blocked.map((b) => b.name))],
       partners: [...new Set(blocked.map((b) => b.other))],
+      repair: foreignKeyRepair(table, target, blocked, options),
     });
   }
 
@@ -253,6 +255,90 @@ function foreignKeyRisks(table, target, changing, options = {}) {
     });
   }
   return risks;
+}
+
+/**
+ * The script that actually gets a text foreign key across.
+ *
+ * Written out rather than described, because every part of it has to match
+ * what is already in the database: the constraint's real name, its columns in
+ * ORDINAL_POSITION order, both column definitions carried over field for field
+ * (a MODIFY that forgets NOT NULL or a DEFAULT is a data bug, not a typo), and
+ * the original ON DELETE / ON UPDATE rules. RESTRICT is left implicit because
+ * that is what MySQL reports for a constraint that never named a rule.
+ *
+ * The two MODIFY statements are deliberately separate: between them the two
+ * ends disagree, and MySQL only tolerates that while no constraint is looking.
+ */
+function foreignKeyRepair(table, target, blocked, options = {}) {
+  const tgtCharset = charsetName(target.charset);
+  const tgtCollation = charsetName(target.collation);
+  const byName = new Map();
+  for (const f of table.foreignKeys || []) {
+    if (!blocked.some((b) => b.name === f.name)) continue;
+    const key = `${f.schemaName}.${f.tableName}.${f.name}`;
+    if (!byName.has(key)) byName.set(key, []);
+    byName.get(key).push(f);
+  }
+
+  const scripts = [];
+  for (const [key, rows] of byName) {
+    const parts = [...rows].sort((a, b) => (Number(a.ordinal) || 0) - (Number(b.ordinal) || 0));
+    const head = parts[0];
+    const childFqn = qq(head.schemaName, head.tableName);
+    const parentFqn = qq(head.refSchema, head.refTable);
+    // Emitted verbatim from REFERENTIAL_CONSTRAINTS rather than filtered down to
+    // "the interesting ones". RESTRICT and NO ACTION behave identically and are
+    // both valid syntax, and which of the two MySQL reports for a constraint
+    // that named neither varies by version - so echoing what the server says
+    // rebuilds the behaviour it has, instead of the behaviour we assumed.
+    const rule = (kind, r) => (r ? ` ON ${kind} ${r}` : '');
+
+    const lines = [
+      `-- ${key}`,
+      '-- 1) ถอด constraint ออกก่อน สองฝั่งจึงจะเป็นคนละ charset ชั่วคราวได้',
+      `ALTER TABLE ${childFqn} DROP FOREIGN KEY ${q(head.name)};`,
+      '',
+      `-- 2) แปลงทั้งสองฝั่งให้เป็น ${tgtCharset} / ${tgtCollation}`,
+    ];
+    for (const f of parts) {
+      const child = fkColumn(f, 'child');
+      const parent = fkColumn(f, 'parent');
+      if (child.columnCharset) {
+        lines.push(`ALTER TABLE ${childFqn} MODIFY COLUMN ${columnDefinition(child, tgtCharset, tgtCollation, options)};`);
+      }
+      if (parent.columnCharset) {
+        lines.push(`ALTER TABLE ${parentFqn} MODIFY COLUMN ${columnDefinition(parent, tgtCharset, tgtCollation, options)};`);
+      }
+    }
+    lines.push(
+      '',
+      '-- 3) ใส่ constraint กลับ พร้อมกฎเดิม',
+      `ALTER TABLE ${childFqn} ADD CONSTRAINT ${q(head.name)}`,
+      `  FOREIGN KEY (${parts.map((f) => q(f.columnName)).join(', ')})`,
+      `  REFERENCES ${parentFqn} (${parts.map((f) => q(f.refColumn)).join(', ')})`
+        + `${rule('DELETE', head.deleteRule)}${rule('UPDATE', head.updateRule)};`
+    );
+    scripts.push({ constraint: head.name, sql: lines.join('\n') });
+  }
+  return scripts;
+}
+
+/** One side of a foreign key, shaped like a normal column row. */
+function fkColumn(f, side) {
+  const pick = (k) => f[`${side}${k}`];
+  return {
+    columnName: side === 'child' ? f.columnName : f.refColumn,
+    columnType: pick('Type'),
+    dataType: pick('DataType'),
+    columnCharset: pick('Charset'),
+    columnCollation: pick('Collation'),
+    isNullable: pick('Nullable'),
+    columnDefault: pick('Default'),
+    extra: pick('Extra') || '',
+    columnComment: pick('Comment') || '',
+    generationExpression: pick('Generation') || '',
+  };
 }
 
 /** Static (metadata-only) risk flags for one table. */
