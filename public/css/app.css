@@ -686,6 +686,18 @@ tbody tr.row-crit td { background: color-mix(in oklab, var(--crit) 10%, var(--bg
 tbody tr.row-warn td { background: color-mix(in oklab, var(--warn) 12%, var(--bg-2)); color: var(--warn-t); }
 tbody tr.row-crit:hover td { background: color-mix(in oklab, var(--crit) 17%, var(--bg-2)); }
 tbody tr.row-warn:hover td { background: color-mix(in oklab, var(--warn) 20%, var(--bg-2)); }
+
+/* The row whose detail is open below. It has to read through row-crit and
+   row-warn, which already own the cell background, so the marker is a bar in
+   the gutter and a weight change rather than another wash of colour. */
+tbody tr.row-picked td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+tbody tr.row-picked td { color: var(--fg); font-weight: 500; }
+tbody tr.row-picked:not(.row-crit):not(.row-warn) td {
+  background: color-mix(in oklab, var(--accent) 11%, var(--bg-2));
+}
+tbody tr.row-picked:not(.row-crit):not(.row-warn):hover td {
+  background: color-mix(in oklab, var(--accent) 15%, var(--bg-2));
+}
 td.mono, th.mono { font-family: var(--mono); }
 td.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
 th.num { text-align: right; }

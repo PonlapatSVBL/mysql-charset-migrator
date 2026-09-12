@@ -12,8 +12,15 @@ import { timeline, timelineLegend } from '../charts.js';
 
 const LIVE = new Set(['queued', 'running', 'paused', 'rolling_back']);
 
+// The whole history is one list, so it grows for the life of the data
+// directory. A page keeps the detail panel - which is the thing an operator
+// actually reads - above the fold instead of below a hundred rows.
+const PAGE_SIZE = 15;
+
 let timer = null;
 let selectedId = null;
+let page = 0;
+let listRows = [];
 let followLog = true;
 let openSteps = new Set();
 let ticking = false;
@@ -31,14 +38,21 @@ export async function render(host, params = {}) {
   const archived = data.archived || [];
   const all = [...live, ...archived];
 
+  // Running jobs first, then history: what is happening now outranks what
+  // happened, whatever the clock says.
+  listRows = [...live.map((j) => ({ job: j, archived: false })), ...archived.map((j) => ({ job: j, archived: true }))];
+
   const wanted = params.jobId || lastJobId || (all[0] ? all[0].id : null);
   selectedId = all.some((j) => j.id === wanted) ? wanted : (all[0] ? all[0].id : null);
   if (selectedId) lastJobId = selectedId;
+  // Open on the page the selected job is actually on, otherwise the highlight
+  // points at a row nobody can see.
+  page = pageOf(selectedId);
 
   host.innerHTML = `
     <div class="card">
       <h2>งาน</h2>
-      <div id="job-list">${all.length ? jobTable(live, archived) : '<div class="empty">ยังไม่มีงาน</div>'}</div>
+      <div id="job-list">${listRows.length ? jobTable() : '<div class="empty">ยังไม่มีงาน</div>'}</div>
       <div class="row-tight"><div class="spacer"></div>
         <button class="btn-sm" id="job-reload">รีเฟรช</button></div>
     </div>
@@ -50,9 +64,13 @@ export async function render(host, params = {}) {
 
   applyDynamicStyles(host);
   $('#job-reload', host).addEventListener('click', () => render(host, { jobId: selectedId }));
-  for (const b of $$('[data-job]', host)) {
-    b.addEventListener('click', () => selectJob(host, b.dataset.job));
-  }
+  // Delegated, because turning the page replaces every row underneath.
+  $('#job-list', host).addEventListener('click', (e) => {
+    const pager = e.target.closest('[data-page]');
+    if (pager) { turnPage(host, Number(pager.dataset.page)); return; }
+    const row = e.target.closest('[data-job]');
+    if (row) selectJob(host, row.dataset.job);
+  });
 
   dispose();
   if (selectedId) await renderDetail(host);
@@ -60,13 +78,34 @@ export async function render(host, params = {}) {
 
 /* ------------------------------------------------------------------- list */
 
-function jobTable(live, archived) {
-  const rows = [...live.map((j) => [j, false]), ...archived.map((j) => [j, true])];
+const pageCount = () => Math.max(1, Math.ceil(listRows.length / PAGE_SIZE));
+
+/** Which page a job sits on, so the selection and the view never disagree. */
+function pageOf(id) {
+  const i = listRows.findIndex((r) => r.job.id === id);
+  return i < 0 ? 0 : Math.floor(i / PAGE_SIZE);
+}
+
+function turnPage(host, to) {
+  const next = Math.min(Math.max(to, 0), pageCount() - 1);
+  if (next === page) return;
+  page = next;
+  const box = $('#job-list', host);
+  if (!box) return;
+  box.innerHTML = jobTable();
+  applyDynamicStyles(box);
+}
+
+function jobTable() {
+  page = Math.min(page, pageCount() - 1);
+  const start = page * PAGE_SIZE;
+  const rows = listRows.slice(start, start + PAGE_SIZE);
   return `<div class="table-wrap"><table>
     <thead><tr><th>id</th><th>เมื่อ</th><th>สถานะ</th><th>คืบหน้า</th></tr></thead>
-    <tbody>${rows.map(([j, arch]) => {
+    <tbody>${rows.map(({ job: j, archived: arch }) => {
     const p = j.progress || {};
-    return `<tr data-job="${esc(j.id)}" class="${j.status === 'failed' ? 'row-crit' : j.status === 'cancelled' || j.status === 'rolled_back' ? 'row-warn' : ''}">
+    const tone = j.status === 'failed' ? 'row-crit' : j.status === 'cancelled' || j.status === 'rolled_back' ? 'row-warn' : '';
+    return `<tr data-job="${esc(j.id)}" class="${tone}${j.id === selectedId ? ' row-picked' : ''}">
         <td class="mono">${esc(j.id)}</td>
         <td class="nowrap">${esc(localTime(j.createdAt))}</td>
         <td class="nowrap"><span class="status-dot ${dotClass(j.status)}"></span> ${statusChip(j.status)}${arch ? chip('archive', 'chip-none') : ''}</td>
@@ -76,7 +115,22 @@ function jobTable(live, archived) {
         </td>
       </tr>`;
   }).join('')}</tbody>
-  </table></div>`;
+  </table></div>
+  ${pager(start, rows.length)}`;
+}
+
+function pager(start, shown) {
+  if (listRows.length <= PAGE_SIZE) return '';
+  const last = pageCount() - 1;
+  return `<div class="row-tight">
+    <span class="hint">${num(start + 1)}–${num(start + shown)} จาก ${num(listRows.length)} งาน</span>
+    <div class="spacer"></div>
+    <button class="btn-sm btn-ghost" data-page="0" ${page === 0 ? 'disabled' : ''}>« ล่าสุด</button>
+    <button class="btn-sm btn-ghost" data-page="${page - 1}" ${page === 0 ? 'disabled' : ''}>‹ ก่อนหน้า</button>
+    <span class="hint mono nowrap">${num(page + 1)}/${num(last + 1)}</span>
+    <button class="btn-sm btn-ghost" data-page="${page + 1}" ${page === last ? 'disabled' : ''}>ถัดไป ›</button>
+    <button class="btn-sm btn-ghost" data-page="${last}" ${page === last ? 'disabled' : ''}>เก่าสุด »</button>
+  </div>`;
 }
 
 function statusChip(status) {
@@ -109,7 +163,16 @@ async function selectJob(host, id) {
   selectedId = id;
   lastJobId = id;
   openSteps = new Set();
+  markSelected(host);
   await renderDetail(host);
+}
+
+/** Move the highlight without rebuilding the list - a redraw would collapse a
+ *  running job's progress bar and scroll the page out from under the click. */
+function markSelected(host) {
+  for (const tr of $$('#job-list tr[data-job]', host)) {
+    tr.classList.toggle('row-picked', tr.dataset.job === selectedId);
+  }
 }
 
 function startPoll(host) {
