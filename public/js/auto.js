@@ -15,6 +15,14 @@
 // preflight that blocks, a baseline that failed, a plan carrying any critical
 // risk, a column set that came back empty - all of them skip the table and
 // record why. Nothing here forces, overrides or acknowledges anything away.
+//
+// Up to three tables can be in flight at once, and exactly one of them can be
+// inside an ALTER. config.js says why in a line - "two concurrent table
+// rebuilds is exactly how a migration takes a server down" - and running the
+// queue unattended does not make that less true. What the parallelism buys is
+// the scanning, which is most of the wall clock on the small tables this is
+// for: a preflight and two checksum passes each, all read-only, none of them
+// fighting over the same pages the way two rebuilds would.
 import { api, state } from './api.js';
 import { tableBody, invalidateInventory } from './store.js';
 import { scanFromResult, recommendedColumns } from './columns.js';
@@ -24,18 +32,54 @@ const POLL_MS = 1500;
 
 const num = (n) => Number(n || 0).toLocaleString('en-US');
 
+export const MAX_WORKERS = 3;
+
 export const auto = {
   running: false,
   stopping: false,
   limits: null,
   queue: [],        // { key, schemaName, tableName, sizeBytes, approxRows }
   results: [],      // { key, outcome, reason, ids }
-  at: -1,           // index into queue currently being worked
-  phase: '',        // what the current table is doing right now
-  inflight: null,   // { kind: 'preflight'|'checksum'|'job', id } - for cancel
+  active: [],       // [{ key, phase }] - one entry per worker holding a table
+  taken: 0,         // how far into the queue the workers have reached
+  altering: '',     // the one table allowed inside an ALTER right now
+  inflight: [],     // [{ key, kind, id }] - what a stop would have to cancel
   startedAt: null,
   finishedAt: null,
 };
+
+/** A worker's line in `auto.active`, so progress is per table, not per run. */
+function slot(key) {
+  let found = auto.active.find((a) => a.key === key);
+  if (!found) { found = { key, phase: '' }; auto.active.push(found); }
+  return found;
+}
+
+function release(key) {
+  auto.active = auto.active.filter((a) => a.key !== key);
+  auto.inflight = auto.inflight.filter((f) => f.key !== key);
+}
+
+/**
+ * One ALTER at a time, however many workers are running.
+ *
+ * A promise chain rather than a counting semaphore, because the limit is one
+ * and is meant to stay one: the moment it takes a number, it is the
+ * concurrency knob config.js refuses to have.
+ */
+let alterGate = Promise.resolve();
+
+function withAlterLock(key, fn) {
+  const mine = alterGate.then(() => {
+    auto.altering = key;
+    notify();
+    return fn();
+  });
+  // The gate must never inherit a rejection, or one failed table would jam
+  // every worker behind it. The caller still gets the error.
+  alterGate = mine.then(() => { auto.altering = ''; }, () => { auto.altering = ''; });
+  return mine;
+}
 
 let notify = () => {};
 
@@ -91,8 +135,8 @@ const ANSWERED_BY_PREFLIGHT = new Set(['lossy_narrowing']);
 const sleep = (ms) => new Promise((r) => { setTimeout(r, ms); });
 
 /** Poll a task to a terminal state, or until the operator stops the run. */
-async function awaitTask(kind, id, get) {
-  auto.inflight = { kind, id };
+async function awaitTask(key, kind, id, get) {
+  auto.inflight.push({ key, kind, id });
   try {
     for (;;) {
       let task;
@@ -102,12 +146,12 @@ async function awaitTask(kind, id, get) {
       await sleep(POLL_MS);
     }
   } finally {
-    auto.inflight = null;
+    auto.inflight = auto.inflight.filter((f) => f.id !== id);
   }
 }
 
-async function awaitJob(id) {
-  auto.inflight = { kind: 'job', id };
+async function awaitJob(key, id) {
+  auto.inflight.push({ key, kind: 'job', id });
   const TERMINAL = new Set(['done', 'failed', 'cancelled', 'rolled_back']);
   try {
     for (;;) {
@@ -117,7 +161,7 @@ async function awaitJob(id) {
       await sleep(POLL_MS);
     }
   } finally {
-    auto.inflight = null;
+    auto.inflight = auto.inflight.filter((f) => f.id !== id);
   }
 }
 
@@ -131,21 +175,21 @@ async function awaitJob(id) {
 async function runOne(row) {
   const { schemaName, tableName, key } = row;
   const ids = {};
+  const me = slot(key);
+  const at = (phase) => { me.phase = phase; notify(); };
   const done = (outcome, reason) => ({ key, outcome, reason, ids });
 
-  auto.phase = 'อ่านโครงสร้าง';
-  notify();
+  at('อ่านโครงสร้าง');
   const detail = await api.tableDetail(schemaName, tableName);
   if (!detail.facts.needsChange) return done('nothing', 'ตารางนี้ตรง target อยู่แล้ว');
 
   // --- 1 preflight --------------------------------------------------------
-  auto.phase = 'ตรวจข้อมูล';
-  notify();
+  at('ตรวจข้อมูล');
   const pf = await api.preflight(tableBody(key, {
     rowLimit: undefined, sampleSize: 5, checkUnique: true, checkDoubleEncoding: true,
   }));
   ids.preflightId = pf.id;
-  const pfTask = await awaitTask('preflight', pf.id, api.preflightGet);
+  const pfTask = await awaitTask(key, 'preflight', pf.id, api.preflightGet);
   if (pfTask.stoppedByOperator) return done('skipped', 'ผู้ใช้สั่งหยุดระหว่างสแกน');
   if (pfTask.status !== 'done') return done('skipped', `สแกนไม่สำเร็จ: ${pfTask.error || pfTask.status}`);
 
@@ -157,11 +201,10 @@ async function runOne(row) {
   const scan = scanFromResult((result.tables || [])[0]);
 
   // --- 2 baseline ---------------------------------------------------------
-  auto.phase = 'เก็บ baseline';
-  notify();
+  at('เก็บ baseline');
   const cs = await api.checksum(tableBody(key, { mode: 'sha256', strategy: 'auto' }));
   ids.checksumId = cs.id;
-  const csTask = await awaitTask('checksum', cs.id, api.checksumGet);
+  const csTask = await awaitTask(key, 'checksum', cs.id, api.checksumGet);
   if (csTask.stoppedByOperator) return done('skipped', 'ผู้ใช้สั่งหยุดระหว่างเก็บ baseline');
   if (csTask.status !== 'done') return done('skipped', `เก็บ baseline ไม่สำเร็จ: ${csTask.error || csTask.status}`);
   const csFull = await api.checksumGet(cs.id, true);
@@ -173,8 +216,7 @@ async function runOne(row) {
   }
 
   // --- 3 plan -------------------------------------------------------------
-  auto.phase = 'สร้างคำสั่ง';
-  notify();
+  at('สร้างคำสั่ง');
   const columns = recommendedColumns(detail.pendingColumns, scan, state.target.charset);
   if (!columns.length && detail.pendingColumns.length) {
     return done('skipped', 'ไม่มีคอลัมน์ไหนที่พิสูจน์ได้ว่าแปลงแล้วไม่เสียตัวอักษร');
@@ -200,29 +242,31 @@ async function runOne(row) {
   }
 
   // --- 4 run --------------------------------------------------------------
-  auto.phase = 'กำลังแปลง';
-  notify();
-  const job = await api.jobRun({
-    planId,
-    preflightId: pf.id,
-    snapshotId: cs.id,
-    verifyChecksum: true,
-    backupStrategy: auto.limits.backupStrategy || 'none',
-    autoRollbackOnFailure: true,
-    stopOnError: true,
+  // The only serialised phase. Other workers go on scanning while this waits.
+  at('รอคิวแปลง');
+  const finished = await withAlterLock(key, async () => {
+    at('กำลังแปลง');
+    const job = await api.jobRun({
+      planId,
+      preflightId: pf.id,
+      snapshotId: cs.id,
+      verifyChecksum: true,
+      backupStrategy: auto.limits.backupStrategy || 'none',
+      autoRollbackOnFailure: true,
+      stopOnError: true,
+    });
+    ids.jobId = job.id;
+    return awaitJob(key, job.id);
   });
-  ids.jobId = job.id;
-  const finished = await awaitJob(job.id);
   if (finished.status !== 'done') {
     return done('failed', `งานจบแบบ ${finished.status}${finished.error ? `: ${finished.error}` : ''}`);
   }
 
   // --- 5 verify -----------------------------------------------------------
-  auto.phase = 'เทียบกับ baseline';
-  notify();
+  at('เทียบกับ baseline');
   const vf = await api.checksumVerify(cs.id, tableBody(key));
   ids.verifyId = vf.id;
-  const vfTask = await awaitTask('checksum', vf.id, api.checksumGet);
+  const vfTask = await awaitTask(key, 'checksum', vf.id, api.checksumGet);
   if (vfTask.status !== 'done') return done('attention', `เทียบผลไม่สำเร็จ: ${vfTask.error || vfTask.status}`);
   const vfFull = await api.checksumGet(vf.id, true);
   const cmp = ((vfFull.result || {}).comparison || {})[key];
@@ -237,7 +281,8 @@ async function runOne(row) {
 }
 
 /**
- * Work the queue. Resolves when the queue is exhausted or the operator stops.
+ * Work the queue with `concurrency` workers. Resolves when the queue is
+ * exhausted or the operator stops.
  *
  * A table that throws is a skipped table, not a stopped run - that is the
  * whole point of the feature, and the reason every failure lands in `results`
@@ -246,38 +291,52 @@ async function runOne(row) {
 export async function startAuto({ queue, limits }, onChange) {
   if (auto.running) return;
   notify = onChange || (() => {});
+  const workers = Math.min(Math.max(Number(limits.concurrency) || 1, 1), MAX_WORKERS);
+  alterGate = Promise.resolve();
   Object.assign(auto, {
     running: true,
     stopping: false,
-    limits,
+    limits: { ...limits, concurrency: workers },
     queue,
     results: [],
-    at: -1,
-    phase: '',
-    inflight: null,
+    active: [],
+    taken: 0,
+    altering: '',
+    inflight: [],
     startedAt: Date.now(),
     finishedAt: null,
   });
   notify();
 
-  try {
-    for (let i = 0; i < queue.length; i++) {
-      if (auto.stopping) break;
-      auto.at = i;
-      auto.phase = '';
+  const worker = async () => {
+    for (;;) {
+      if (auto.stopping) return;
+      if (auto.taken >= queue.length) return;
+      // Reading and incrementing without an await between them is what makes
+      // this safe: one JavaScript thread, so no two workers can take the same
+      // index however many of them there are.
+      const row = queue[auto.taken];
+      auto.taken += 1;
       notify();
       let record;
       try {
-        record = await runOne(queue[i]);
+        record = await runOne(row);
       } catch (err) {
-        record = { key: queue[i].key, outcome: 'failed', reason: err.message, ids: {} };
+        record = { key: row.key, outcome: 'failed', reason: err.message, ids: {} };
+      } finally {
+        release(row.key);
       }
       auto.results.push(record);
       notify();
     }
+  };
+
+  try {
+    await Promise.all(Array.from({ length: workers }, worker));
   } finally {
-    auto.at = -1;
-    auto.phase = '';
+    auto.active = [];
+    auto.inflight = [];
+    auto.altering = '';
     auto.running = false;
     auto.finishedAt = Date.now();
     // The run changed charsets across the instance; every derived list is stale.
@@ -290,13 +349,16 @@ export async function startAuto({ queue, limits }, onChange) {
 export async function stopAuto({ cancelCurrent = false } = {}) {
   auto.stopping = true;
   notify();
-  if (!cancelCurrent || !auto.inflight) return;
-  const { kind, id } = auto.inflight;
-  try {
-    if (kind === 'preflight') await api.preflightCancel(id);
-    else if (kind === 'checksum') await api.checksumCancel(id);
-    else if (kind === 'job') await api.jobCancel(id);
-  } catch { /* already finishing on its own */ }
+  if (!cancelCurrent) return;
+  // Every worker's task, not just one: with three in flight, cancelling the
+  // first one found would leave two running and look like the stop failed.
+  await Promise.all(auto.inflight.map(async ({ kind, id }) => {
+    try {
+      if (kind === 'preflight') await api.preflightCancel(id);
+      else if (kind === 'checksum') await api.checksumCancel(id);
+      else if (kind === 'job') await api.jobCancel(id);
+    } catch { /* already finishing on its own */ }
+  }));
 }
 
 export function summarise(results) {

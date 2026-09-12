@@ -10,13 +10,13 @@ import { navigate } from '../app.js';
 import {
   $, $$, esc, num, bytes, duration, note, chip, toast, confirmDialog, setBusy, applyDynamicStyles,
 } from '../util.js';
-import { auto, startAuto, stopAuto, applyLimits, outcomeLabel, summarise } from '../auto.js';
+import { auto, startAuto, stopAuto, applyLimits, outcomeLabel, summarise, MAX_WORKERS } from '../auto.js';
 
 // Deliberately modest. The row default is the preflight's own scan cap: below
 // it every table is read end to end, so the column picker can PROVE each
 // column rather than infer it - which is exactly the standard an unattended
 // run should be held to.
-const DEFAULTS = { maxRows: 200000, maxSizeMb: 500, backupStrategy: 'none' };
+const DEFAULTS = { maxRows: 200000, maxSizeMb: 500, backupStrategy: 'none', concurrency: 1 };
 
 // One page of the work list is the queue, and the server caps a page at 500.
 // A bigger queue is not a bigger run - it is a second run after this one.
@@ -48,12 +48,21 @@ export async function render(host, params = {}) {
           <input id="au-rows" type="number" min="0" step="1000" value="${ui.maxRows}"></label>
         <label class="field"><span>และขนาดไม่เกิน (MB)</span>
           <input id="au-mb" type="number" min="0" step="10" value="${ui.maxSizeMb}"></label>
+        <label class="field"><span>ทำพร้อมกันกี่ตาราง</span>
+          <select id="au-conc">
+            ${Array.from({ length: MAX_WORKERS }, (_, i) => `<option value="${i + 1}">${i + 1}</option>`).join('')}
+          </select></label>
         <label class="field"><span>สำรองก่อนแปลง</span>
           <select id="au-backup">
             <option value="none">ไม่สำรอง</option>
             <option value="table_copy">ก๊อปตารางไว้ในฐานข้อมูล</option>
           </select></label>
       </div>
+      ${note('info', 'ทำพร้อมกันได้ แต่ ALTER ยังทีละตัว',
+    `การสแกนกินเวลาส่วนใหญ่ของตารางเล็ก และสแกนพร้อมกันได้อย่างปลอดภัยเพราะเป็นการอ่านล้วน
+       แต่ตอนเขียนข้อมูลจริง ระบบจะปล่อยให้ <strong>ทีละตารางเท่านั้น</strong> เข้า ALTER
+       ตัวอื่นจะสแกนต่อไปแล้วรอคิว — การ rebuild สองตารางพร้อมกันคือวิธีทำให้เซิร์ฟเวอร์ล่ม
+       ซึ่งเป็นเหตุผลเดียวกับที่ตัวรัน job ไม่เคยมี knob ปรับ concurrency`)}
       ${note('info', `ทำไมตั้งต้นที่ ${num(DEFAULTS.maxRows)} แถว`,
     `ต่ำกว่านี้ Preflight จะอ่าน<strong>ครบทุกแถว</strong> ตัวเลือกคอลัมน์จึงพิสูจน์ได้จริงว่าไม่มีตัวอักษรไหนหาย
        ไม่ใช่แค่สุ่มตรวจ — ตารางที่ใหญ่กว่านี้ควรทำเองทีละตัวจะดีกว่า`)}
@@ -65,6 +74,8 @@ export async function render(host, params = {}) {
     </div>`;
 
   $('#au-backup', host).value = ui.backupStrategy;
+  $('#au-conc', host).value = String(ui.concurrency);
+  $('#au-conc', host).addEventListener('change', () => { ui.concurrency = Number($('#au-conc', host).value) || 1; });
   $('#au-back', host).addEventListener('click', () => navigate('tables'));
   for (const id of ['au-rows', 'au-mb']) {
     $(`#${id}`, host).addEventListener('change', () => loadPreview(host));
@@ -79,7 +90,12 @@ function readLimits(host) {
   ui.maxRows = Math.max(0, Number($('#au-rows', host).value) || 0);
   ui.maxSizeMb = Math.max(0, Number($('#au-mb', host).value) || 0);
   ui.backupStrategy = $('#au-backup', host) ? $('#au-backup', host).value : 'none';
-  return { maxRows: ui.maxRows, maxSizeMb: ui.maxSizeMb, backupStrategy: ui.backupStrategy };
+  const conc = $('#au-conc', host);
+  if (conc) ui.concurrency = Math.min(Math.max(Number(conc.value) || 1, 1), MAX_WORKERS);
+  return {
+    maxRows: ui.maxRows, maxSizeMb: ui.maxSizeMb,
+    backupStrategy: ui.backupStrategy, concurrency: ui.concurrency,
+  };
 }
 
 /**
@@ -139,7 +155,7 @@ async function begin(host) {
     return;
   }
   const ok = await confirmDialog({
-    title: `รันอัตโนมัติ ${preview.eligible.length} ตาราง?`,
+    title: `รันอัตโนมัติ ${preview.eligible.length} ตาราง (พร้อมกัน ${limits.concurrency})?`,
     body: `<p>จะไล่ทำทีละตารางด้วยขั้นตอนเดิมครบทุกขั้น และ <strong>เขียนข้อมูลจริง</strong></p>
       <p>ตารางที่ Preflight บล็อก เก็บ baseline ไม่สำเร็จ หรือแผนมีความเสี่ยงระดับ critical
          จะถูกข้ามและรายงานไว้ ไม่มีการบังคับรันข้ามด่านใดๆ</p>
@@ -176,7 +192,7 @@ function watch(host) {
       return;
     }
     setBusy(true, 'กำลังรันอัตโนมัติ', {
-      detail: `${num(auto.results.length)}/${num(auto.queue.length)} ตาราง${auto.phase ? ` · ${auto.phase}` : ''}`,
+      detail: `${num(auto.results.length)}/${num(auto.queue.length)} ตาราง${auto.active.length > 1 ? ` · ทำอยู่ ${auto.active.length}` : ''}`,
       cancelText: 'หยุด',
       onCancel: () => { stopAuto(); toast('จะหยุดหลังตารางนี้จบ', 'warn', 7000); },
     });
@@ -195,11 +211,13 @@ function drawRun(host) {
   // Nothing moves between two polls of the same step, so only repaint when
   // something an operator can see has actually changed. Otherwise the results
   // table scrolls itself back to the top under them once a second.
-  const signature = [auto.running, auto.stopping, auto.at, auto.phase, auto.results.length].join('|');
+  const signature = [
+    auto.running, auto.stopping, auto.results.length, auto.altering,
+    auto.active.map((a) => `${a.key}:${a.phase}`).join(','),
+  ].join('|');
   if (signature === lastPaint && host.querySelector('#au-results')) return;
   lastPaint = signature;
   const by = summarise(auto.results);
-  const current = auto.at >= 0 ? auto.queue[auto.at] : null;
   const pct = auto.queue.length ? (auto.results.length / auto.queue.length) * 100 : 0;
 
   host.innerHTML = `
@@ -214,7 +232,13 @@ function drawRun(host) {
         <div class="progress"><span data-width="${pct}"></span></div>
         <span class="hint nowrap">${num(auto.results.length)}/${num(auto.queue.length)}</span>
       </div>
-      ${current ? `<p class="hint">กำลังทำ <span class="mono">${esc(current.key)}</span>${auto.phase ? ` · ${esc(auto.phase)}` : ''}</p>` : ''}
+      ${auto.limits && auto.limits.concurrency > 1
+    ? `<p class="hint">ทำพร้อมกัน ${num(auto.limits.concurrency)} ตาราง · ALTER ทีละตัว</p>` : ''}
+      ${auto.active.length ? `<ul class="worklines">${auto.active.map((a) => `
+        <li><span class="status-dot ${a.key === auto.altering ? 'running' : 'pending'}"></span>
+          <span class="mono">${esc(a.key)}</span>
+          <span class="hint">${esc(a.phase || 'รอเริ่ม')}</span>
+          ${a.key === auto.altering ? chip('กำลังเขียนข้อมูล', 'chip-warn') : ''}</li>`).join('')}</ul>` : ''}
       ${auto.stopping && auto.running ? note('warn', 'สั่งหยุดแล้ว', 'จะหยุดหลังตารางนี้จบ') : ''}
       <div class="factstrip">
         <div><span class="k">แปลงแล้ว</span><span class="v ok">${num(by.converted)}</span></div>

@@ -707,6 +707,13 @@ tbody td .btn-sm { margin: -2px 0; }
 /* the annotation must never outsize the datum it annotates */
 tbody td .hint, .legend .hint, .stat .hint { font-size: var(--t-micro); }
 
+/* The automatic runner's in-flight lines: one per worker, so several tables
+   are visibly on the go at once without any of them looking like the run. */
+.worklines { list-style: none; margin: var(--s3) 0 0; padding: 0; display: grid; gap: var(--s2); }
+.worklines li { display: flex; gap: var(--s2); align-items: center; min-width: 0; }
+.worklines .mono { font-size: var(--t-mini); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.worklines .hint { white-space: nowrap; }
+
 /* ------------------------------------------------------------------ chips */
 .chip {
   display: inline-block; padding: 1px var(--s2); border-radius: 999px;

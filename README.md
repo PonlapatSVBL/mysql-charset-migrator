@@ -435,6 +435,16 @@ baseline แผน และ job ของตัวเอง สิ่งที�
 ซึ่งไม่ใช่ความระมัดระวัง แต่คือฟีเจอร์ที่ปฏิเสธจะทำงาน ส่วน `index_too_long`, `row_too_large`,
 `fk_charset_mismatch` ไม่เคยถูกยกเว้น — ทั้งสามแปลว่า MySQL จะปฏิเสธคำสั่ง และไม่มีการสแกนไหนตอบแทนได้
 
+**ทำพร้อมกันได้ 1–3 ตาราง (ตั้งต้น 1) แต่ ALTER ยังทีละตัว** — การสแกน (preflight + checksum สองรอบต่อตาราง)
+เป็นการอ่านล้วนและกินเวลาส่วนใหญ่ของตารางเล็ก จึงทำพร้อมกันได้ปลอดภัย ส่วนช่วงเขียนข้อมูลจริง
+ระบบปล่อยให้ **ทีละตารางเท่านั้น** เข้า ALTER ตัวอื่นสแกนต่อแล้วรอคิว เหตุผลเดียวกับที่ตัวรัน job
+ไม่เคยมี knob ปรับ concurrency (ดู `config.js`): การ rebuild สองตารางพร้อมกันคือวิธีทำให้เซิร์ฟเวอร์ล่ม
+เกตตัวนี้เป็น promise chain ที่ล็อกไว้ที่ 1 ตัวเลข — ถ้าวันไหนมันรับพารามิเตอร์ได้ นั่นคือ knob ที่ตั้งใจไม่ให้มี
+มีเทสต์พิสูจน์ด้วยการนับ overlap จริง ไม่ใช่อ่านโค้ดเอา และพิสูจน์ว่าตารางที่ ALTER พังไม่ทำให้คิวค้าง
+
+`CSMIG_POOL_LIMIT` ขยับจาก 4 เป็น 8 เพื่อให้ worker สามตัวสแกนพร้อมกัน + connection ที่ค้างไว้ตลอด ALTER
++ ที่เหลือให้หน้าเว็บ poll ความคืบหน้าได้โดยไม่ต้องเข้าคิว
+
 **เพดานสองตัว** ตั้งได้ก่อนเริ่ม: จำนวนแถวสูงสุด (ตั้งต้น 200,000) และขนาดสูงสุด (ตั้งต้น 500 MB)
 ค่าแถวตั้งต้นเท่ากับเพดานสแกนของ preflight พอดี — ต่ำกว่านั้น preflight อ่าน**ครบทุกแถว**
 ตัวเลือกคอลัมน์จึง*พิสูจน์*ได้จริง ไม่ใช่แค่สุ่มตรวจ ซึ่งเป็นมาตรฐานที่การรันแบบไม่มีคนดูควรถูกวัด
@@ -871,7 +881,7 @@ env var ทั้งหมดที่ `config.js` และ `security.js` อ�
 | `CSMIG_TARGET_CHARSET` | `utf8mb3` | charset เป้าหมายเริ่มต้น (override ต่อ request ได้ด้วย `targetCharset` ใน body/query) |
 | `CSMIG_TARGET_COLLATION` | `utf8mb3_general_ci` | collation เป้าหมายเริ่มต้น (override ด้วย `targetCollation`) |
 | `CSMIG_IDLE_TIMEOUT_MS` | `1800000` (30 นาที) | ไม่มี request เข้ามาเกินนี้ → session ถูกทำลาย, pool ปิด, vault ถูก wipe |
-| `CSMIG_POOL_LIMIT` | `4` | `connectionLimit` ของ mysql2 pool ต่อ session |
+| `CSMIG_POOL_LIMIT` | `8` | ขนาด pool ต่อ session — เผื่อ worker ของการรันอัตโนมัติสามตัว + ALTER + การ poll ของหน้าเว็บ
 | `CSMIG_FRESH_STATS` | `1` | ตั้ง `information_schema_stats_expiry = 0` ต่อ session เพื่อให้ขนาด/จำนวนแถวสดเสมอ ตั้ง `0` ถ้า instance มีตารางเยอะจนหน้า inventory ช้า |
 | `CSMIG_MAX_THREADS_RUNNING` | `40` | เพดาน `Threads_running` ที่ยอมให้เริ่ม rebuild — สูงกว่านี้ job จะรอ |
 | `CSMIG_MAX_REPLICA_LAG` | `30` | เพดาน replica lag (วินาที) ที่ยอมให้เริ่ม rebuild |

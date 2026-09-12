@@ -26,7 +26,11 @@ module.exports = {
 
   // Connection pool per session
   pool: {
-    connectionLimit: Number(process.env.CSMIG_POOL_LIMIT || 4),
+    // Headroom for the automatic runner: up to three workers scanning at once,
+    // one connection held for the length of an ALTER, and enough left over
+    // that the page polling for progress is not queued behind them. Four was
+    // right when the console did one thing at a time.
+    connectionLimit: Number(process.env.CSMIG_POOL_LIMIT || 8),
     connectTimeoutMs: 15000,
     // MySQL 8.0 serves TABLE_ROWS, DATA_LENGTH and INDEX_LENGTH out of a cache
     // refreshed only once it is older than information_schema_stats_expiry -
