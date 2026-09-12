@@ -658,9 +658,22 @@ function columnSafety(c) {
     why: `${c.columnCharset} กว้างกว่า ${tgt} และยังไม่มีผลสแกนของคอลัมน์นี้` };
 }
 
-/** The wiring a collation mismatch actually breaks: joins, lookups, FKs. */
+/**
+ * The wiring a collation mismatch actually breaks: joins, lookups, FKs.
+ *
+ * `indexed` is the good signal - it counts every index the column appears in,
+ * including the parts of a composite that COLUMN_KEY never mentions. But it
+ * arrives from the server, and a browser gets fresh static files while the API
+ * is still whatever the running process loaded at startup; a column that MySQL
+ * itself marks PRI/UNI/MUL must not read as unwired just because the two ends
+ * are a restart apart. So `columnKey` stands behind it, and the name behind
+ * that.
+ */
 function isWired(c) {
-  return !!(c.indexed || (c.foreignKeyNames && c.foreignKeyNames.length) || /_id$/i.test(c.columnName));
+  return !!(c.indexed
+    || c.columnKey
+    || (c.foreignKeyNames && c.foreignKeyNames.length)
+    || /_id$/i.test(c.columnName));
 }
 
 function columnPickerRows() {
@@ -726,14 +739,19 @@ function wirePlan(host) {
     const unproven = held.filter((c) => !c.lossless && !c.generated);
     const noteBox = $('#pl-colnote', host);
     if (noteBox) {
+      // Why a column is held back matters more than how many are: "scan the
+      // whole table" is useless advice to someone who already did, and whose
+      // result simply has not loaded into this page yet.
+      const why = !lastScan()
+        ? 'หน้านี้ยังไม่มีผลสแกนของตารางนี้ ถ้าเพิ่งสแกนไป ลองเปิดขั้น 1 ให้ผลโหลดขึ้นมาก่อน '
+        : unproven.length
+          ? `อีก ${unproven.length} คอลัมน์เป็น charset ที่กว้างกว่าและยังพิสูจน์ไม่ได้ `
+            + 'ถ้าอยากให้ติ๊กให้เอง ต้องกลับไปสแกนขั้น 1 แบบดูครบทั้งตาราง '
+          : '';
       noteBox.innerHTML = held.length
         ? note('info', `เว้นไว้ ${held.length} คอลัมน์`,
           `ติ๊กให้เฉพาะคอลัมน์ที่พิสูจน์แล้วว่าแปลงเป็น ${esc(state.target.charset)} โดยไม่เสียตัวอักษร `
-          + (unproven.length
-            ? `อีก ${unproven.length} คอลัมน์เป็น charset ที่กว้างกว่าและยังพิสูจน์ไม่ได้ `
-              + 'ถ้าอยากให้ติ๊กให้เอง ต้องกลับไปสแกนขั้น 1 แบบดูครบทั้งตาราง '
-            : '')
-          + 'ติ๊กเองได้ถ้ารู้ว่าข้อมูลข้างในปลอดภัย')
+          + why + 'ติ๊กเองได้ถ้ารู้ว่าข้อมูลข้างในปลอดภัย')
         : '';
     }
     sync();
@@ -766,6 +784,17 @@ function wirePlan(host) {
               : safe && isWired(col);
       }
       sync();
+      // A pick that ticks nothing looks identical to a button that does
+      // nothing. Say which it was.
+      if (how !== 'none' && boxes().length && !picked().length) {
+        const wired = detail.pendingColumns.filter(isWired).length;
+        toast(how === 'keys' && wired
+          ? `มีคอลัมน์คีย์/index อยู่ ${wired} คอลัมน์ แต่ยังไม่มีอันไหนพิสูจน์ได้ว่าแปลงแล้วไม่เสียตัวอักษร`
+          : how === 'keys'
+            ? 'ตารางนี้ไม่มีคอลัมน์ข้อความที่เป็นคีย์หรืออยู่ใน index'
+            : `ยังไม่มีคอลัมน์ไหนพิสูจน์ได้ว่าแปลงเป็น ${state.target.charset} ได้โดยไม่เสียตัวอักษร`,
+        'warn', 7000);
+      }
     });
   }
   applyDefaults();
