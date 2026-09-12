@@ -680,22 +680,45 @@ function columnSafety(c) {
       why: `${c.columnCharset} กว้างกว่า ${tgt} แต่สแกนครบทั้งตารางแล้วไม่เจอตัวอักษรที่เก็บไม่ได้สักแถว` };
   }
   if (scan && scan.lossy === 0) {
-    const wired = isWired(c);
+    const reason = isWired(c) ? 'เป็นคีย์หรืออยู่ใน index จึงเก็บรหัส/สถานะ ไม่ใช่ข้อความอิสระ'
+      : isShortCode(c) ? `เป็น ${c.dataType}(${num(c.charMaxLen)}) สั้นเกินกว่าจะถูกใช้เก็บข้อความอิสระ`
+        : null;
     return {
-      tick: wired,
+      tick: !!reason,
       proven: false,
-      tone: wired ? 'chip-warn' : 'chip-none',
-      label: wired ? `สะอาดใน ${num(tb.scannedRows)} แถว` : 'ยังพิสูจน์ไม่ได้',
+      tone: reason ? 'chip-warn' : 'chip-none',
+      label: reason ? `สะอาดใน ${num(tb.scannedRows)} แถว` : 'ยังพิสูจน์ไม่ได้',
       why: `${c.columnCharset} กว้างกว่า ${tgt} สแกนไปแค่ ${num(tb.scannedRows)} แถวแรกแล้วยังไม่เจออะไร `
         + 'แต่แถวที่เหลือยังไม่ได้ดู '
-        + (wired
-          ? 'ติ๊กให้เพราะคอลัมน์นี้เป็นคีย์หรืออยู่ใน index จึงเก็บรหัส/สถานะ ไม่ใช่ข้อความอิสระ '
-            + 'ถ้าอยากได้ความแน่นอน ให้สแกนทั้งตารางที่ขั้น 1'
+        + (reason
+          ? `ติ๊กให้เพราะคอลัมน์นี้${reason} ถ้าอยากได้ความแน่นอน ให้สแกนทั้งตารางที่ขั้น 1`
           : 'ไม่ติ๊กให้เพราะเป็นข้อความอิสระ ซึ่งเป็นที่ที่ emoji โผล่ได้ในแถวที่ยังไม่ได้ดู'),
     };
   }
   return { tick: false, proven: false, tone: 'chip-warn', label: 'ยังไม่ได้ตรวจ',
     why: `${c.columnCharset} กว้างกว่า ${tgt} และยังไม่มีผลสแกนของคอลัมน์นี้` };
+}
+
+/**
+ * A field too narrow to be prose.
+ *
+ * Not because an emoji would not fit - one character fits anywhere - but
+ * because of what a field this size is declared FOR. Nobody sizes a column at
+ * twenty characters and then stores a sentence, a comment or a customer's
+ * display name in it; they store a code, a status, a document number, a
+ * currency or country abbreviation. That is the same content a key column
+ * holds, so it earns the same treatment in the evidence tier: a clean capped
+ * scan is enough for it, and a scan that found damage still vetoes it.
+ *
+ * `char` counts alongside `varchar` - the same shape, declared even more
+ * deliberately. The longer types never reach this test: tinytext alone is 255.
+ */
+const SHORT_CODE_LEN = 20;
+
+function isShortCode(c) {
+  return /^(char|varchar)$/i.test(String(c.dataType || ''))
+    && Number(c.charMaxLen) > 0
+    && Number(c.charMaxLen) <= SHORT_CODE_LEN;
 }
 
 /**
@@ -788,8 +811,9 @@ function wirePlan(host) {
       if (onEvidence) {
         parts.push(note('warn', `ติ๊กให้ ${onEvidence} คอลัมน์จากการสุ่มตรวจ`,
           `สแกนล่าสุดดูไป ${num(tb ? tb.scannedRows : 0)} แถวแรก ไม่ครบทั้งตาราง แล้วไม่เจอตัวอักษรที่ `
-          + `<code>${esc(state.target.charset)}</code> เก็บไม่ได้ คอลัมน์ที่ติ๊กให้เป็นคีย์หรืออยู่ใน index `
-          + 'จึงเก็บรหัสหรือสถานะ ไม่ใช่ข้อความอิสระ — แต่แถวที่เหลือยังไม่ได้ดูจริงๆ '
+          + `<code>${esc(state.target.charset)}</code> เก็บไม่ได้ คอลัมน์ที่ติ๊กให้เป็นคีย์ อยู่ใน index `
+          + `หรือเป็น char/varchar ยาวไม่เกิน ${SHORT_CODE_LEN} ตัวอักษร จึงเก็บรหัสหรือสถานะ ไม่ใช่ข้อความอิสระ `
+          + '— แต่แถวที่เหลือยังไม่ได้ดูจริงๆ '
           + 'ถ้าตารางนี้สำคัญ ให้กลับไปสแกนแบบดูครบทั้งตารางที่ขั้น 1 ก่อนรัน'));
       }
       if (held) {
