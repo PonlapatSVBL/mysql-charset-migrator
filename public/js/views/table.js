@@ -576,7 +576,7 @@ function stepPlan(st, at) {
         <span>คอลัมน์ที่จะแปลง <span class="hint" id="pl-colcount"></span></span>
         <div class="collist" id="pl-collist"></div>
         <div class="row-tight">
-          <button class="btn-sm btn-ghost" data-pick="safe">ที่ปลอดภัย</button>
+          <button class="btn-sm btn-ghost" data-pick="safe">ที่แนะนำ</button>
           <button class="btn-sm btn-ghost" data-pick="keys">เฉพาะคีย์ / index</button>
           <button class="btn-sm btn-ghost" data-pick="all">ทั้งหมด</button>
           <button class="btn-sm btn-ghost" data-pick="none">ล้าง</button>
@@ -628,15 +628,27 @@ function lastScan() {
  * missed the rest of every index, missed foreign keys, and left the table in a
  * mixed-charset state nobody asked for.
  *
- * The rule now is to tick a column when narrowing it is PROVEN not to lose a
- * character, and never otherwise. Proof comes from exactly two places:
+ * Proof comes from exactly two places:
  *
  *  1. The charset. latin1, tis620, ucs2, utf8mb3 itself - none of them can
  *     hold anything the target cannot, whatever sits in the rows. That is the
  *     server's `lossless`, and it needs no scan at all.
  *  2. The scan, but only when it read every row. Zero lossy rows out of the
- *     first 200,000 of 40M is a sample; zero out of all of them is a proof. A
- *     capped scan leaves the possibility standing, so the column stays clear.
+ *     first 200,000 of 40M is a sample; zero out of all of them is a proof.
+ *
+ * Demanding proof and nothing less was the first attempt, and it was wrong:
+ * the default scan is capped at 200,000 rows, so on every table big enough to
+ * care about, nothing was provable and the picker ticked nothing at all - worse
+ * than the *_id rule it replaced, which at least ticked something.
+ *
+ * So there is a third tier, for a column the scan read and found clean without
+ * reaching the end of the table. That is evidence, not proof, and it is enough
+ * only for a column the schema wires into a key, an index or a foreign key.
+ * Those hold identifiers - codes, statuses, keys - and an identifier that was
+ * ever going to hold a character outside the target would almost certainly
+ * have shown one in the 200,000 rows already read. Free text is the opposite
+ * case, and free text is exactly where an emoji turns up on row 3,000,001, so
+ * an unwired column stays clear until the scan reaches the end.
  *
  * A column the scan found lossy rows in is never ticked - nor one whose bytes
  * look double-encoded, where the conversion succeeds and quietly returns
@@ -660,19 +672,29 @@ function columnSafety(c) {
       why: 'generated column MySQL มักปฏิเสธการแปลง charset ต้อง drop แล้วสร้างใหม่เอง' };
   }
   if (c.lossless) {
-    return { tick: true, tone: 'chip-ok', label: 'ปลอดภัย',
+    return { tick: true, proven: true, tone: 'chip-ok', label: 'ปลอดภัย',
       why: `${c.columnCharset} เก็บอะไรได้ ${tgt} ก็เก็บได้หมด ไม่ว่าข้างในจะเป็นข้อมูลอะไร` };
   }
   if (scan && scan.lossy === 0 && tb.coverage === 'full') {
-    return { tick: true, tone: 'chip-ok', label: 'สแกนครบแล้ว',
+    return { tick: true, proven: true, tone: 'chip-ok', label: 'สแกนครบแล้ว',
       why: `${c.columnCharset} กว้างกว่า ${tgt} แต่สแกนครบทั้งตารางแล้วไม่เจอตัวอักษรที่เก็บไม่ได้สักแถว` };
   }
   if (scan && scan.lossy === 0) {
-    return { tick: false, tone: 'chip-warn', label: 'ยังพิสูจน์ไม่ได้',
+    const wired = isWired(c);
+    return {
+      tick: wired,
+      proven: false,
+      tone: wired ? 'chip-warn' : 'chip-none',
+      label: wired ? `สะอาดใน ${num(tb.scannedRows)} แถว` : 'ยังพิสูจน์ไม่ได้',
       why: `${c.columnCharset} กว้างกว่า ${tgt} สแกนไปแค่ ${num(tb.scannedRows)} แถวแรกแล้วยังไม่เจออะไร `
-        + 'แต่แถวที่เหลือยังไม่ได้ดู ถ้าจะให้ติ๊กให้อัตโนมัติต้องสแกนทั้งตารางที่ขั้น 1' };
+        + 'แต่แถวที่เหลือยังไม่ได้ดู '
+        + (wired
+          ? 'ติ๊กให้เพราะคอลัมน์นี้เป็นคีย์หรืออยู่ใน index จึงเก็บรหัส/สถานะ ไม่ใช่ข้อความอิสระ '
+            + 'ถ้าอยากได้ความแน่นอน ให้สแกนทั้งตารางที่ขั้น 1'
+          : 'ไม่ติ๊กให้เพราะเป็นข้อความอิสระ ซึ่งเป็นที่ที่ emoji โผล่ได้ในแถวที่ยังไม่ได้ดู'),
+    };
   }
-  return { tick: false, tone: 'chip-warn', label: 'ยังไม่ได้ตรวจ',
+  return { tick: false, proven: false, tone: 'chip-warn', label: 'ยังไม่ได้ตรวจ',
     why: `${c.columnCharset} กว้างกว่า ${tgt} และยังไม่มีผลสแกนของคอลัมน์นี้` };
 }
 
@@ -753,26 +775,31 @@ function wirePlan(host) {
    *  is half of what decides which columns are safe. */
   const applyDefaults = () => {
     if (list) list.innerHTML = columnPickerRows();
-    const held = detail.pendingColumns.filter((c) => !columnSafety(c).tick);
-    const unproven = held.filter((c) => !c.lossless && !c.generated);
+    const verdicts = detail.pendingColumns.map((c) => columnSafety(c));
+    const held = verdicts.filter((v) => !v.tick).length;
+    const onEvidence = verdicts.filter((v) => v.tick && !v.proven).length;
+    const tb = lastScan();
     const noteBox = $('#pl-colnote', host);
     if (noteBox) {
-      // Why a column is held back matters more than how many are, so this
-      // states the evidence on hand rather than assuming which is missing.
-      const tb = lastScan();
-      const why = !tb
-        ? 'ยังไม่มีผลสแกนของตารางนี้ในหน้านี้ ไปที่ขั้น 1 แล้วสแกนก่อน '
-        : tb.coverage !== 'full'
-          ? `สแกนล่าสุดดูไปแค่ ${num(tb.scannedRows)} แถวแรก ไม่ครบทั้งตาราง `
-            + 'ผลแบบนั้นเป็นการสุ่มตรวจ ยังพิสูจน์ไม่ได้ ถ้าอยากให้ติ๊กให้เอง ต้องสแกนแบบดูครบทั้งตาราง '
-          : unproven.length
-            ? `สแกนครบทั้งตารางแล้ว แต่อีก ${unproven.length} คอลัมน์ยังมีแถวที่แปลงแล้วจะเสียตัวอักษร `
-            : '';
-      noteBox.innerHTML = held.length
-        ? note('info', `เว้นไว้ ${held.length} คอลัมน์`,
-          `ติ๊กให้เฉพาะคอลัมน์ที่พิสูจน์แล้วว่าแปลงเป็น ${esc(state.target.charset)} โดยไม่เสียตัวอักษร `
-          + why + 'ติ๊กเองได้ถ้ารู้ว่าข้อมูลข้างในปลอดภัย')
-        : '';
+      // Two different things an operator needs to know, and they are not the
+      // same sentence: what was left out, and what was ticked on evidence
+      // rather than on proof. The second one is the riskier half, so it leads.
+      const parts = [];
+      if (onEvidence) {
+        parts.push(note('warn', `ติ๊กให้ ${onEvidence} คอลัมน์จากการสุ่มตรวจ`,
+          `สแกนล่าสุดดูไป ${num(tb ? tb.scannedRows : 0)} แถวแรก ไม่ครบทั้งตาราง แล้วไม่เจอตัวอักษรที่ `
+          + `<code>${esc(state.target.charset)}</code> เก็บไม่ได้ คอลัมน์ที่ติ๊กให้เป็นคีย์หรืออยู่ใน index `
+          + 'จึงเก็บรหัสหรือสถานะ ไม่ใช่ข้อความอิสระ — แต่แถวที่เหลือยังไม่ได้ดูจริงๆ '
+          + 'ถ้าตารางนี้สำคัญ ให้กลับไปสแกนแบบดูครบทั้งตารางที่ขั้น 1 ก่อนรัน'));
+      }
+      if (held) {
+        parts.push(note('info', `เว้นไว้ ${held} คอลัมน์`,
+          !tb
+            ? 'ยังไม่มีผลสแกนของตารางนี้ ไปที่ขั้น 1 แล้วสแกนก่อน ติ๊กเองได้ถ้ารู้ว่าข้อมูลข้างในปลอดภัย'
+            : 'เป็นข้อความอิสระที่ยังพิสูจน์ไม่ได้ หรือสแกนแล้วเจอแถวที่จะเสียตัวอักษรจริง '
+              + 'เปิดดูเหตุผลรายคอลัมน์ได้จากการชี้ค้างที่ชื่อคอลัมน์ ติ๊กเองได้ถ้ารู้ว่าข้อมูลข้างในปลอดภัย'));
+      }
+      noteBox.innerHTML = parts.join('');
     }
     sync();
   };
