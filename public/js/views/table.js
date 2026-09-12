@@ -17,10 +17,6 @@ import {
 let key = null;
 let detail = null;
 let timers = [];
-// Set by wirePlan. The scan is half of what decides which columns are safe to
-// convert, and it lands after the step is drawn - this re-runs the default tick
-// once it does.
-let planPicker = null;
 
 /**
  * Fetched payloads for the currently open table. Keyed by the id they came
@@ -254,7 +250,12 @@ function wirePreflight(host) {
         checkUnique: $('#pf-unique', host) ? $('#pf-unique', host).checked : true,
         checkDoubleEncoding: $('#pf-double', host) ? $('#pf-double', host).checked : true,
       }));
-      setTableState(key, { preflightId: task.id, preflightGate: null, preflightAt: task.createdAt });
+      setTableState(key, {
+        preflightId: task.id, preflightGate: null, preflightAt: task.createdAt,
+        // The old verdict belongs to the old id; leaving it would let the
+        // picker vouch for columns using a scan that has been superseded.
+        preflightScanned: false, preflightCoverage: null, preflightRows: null, preflightColumns: {},
+      });
       watchTask(host, 'preflight', task.id);
     } catch (err) {
       toast(err.message, 'err', 9000);
@@ -341,11 +342,29 @@ async function loadPreflight(host, id, announce = false) {
   }
 
   const tb = (r.tables || [])[0];
-  const st0 = tableState(key);
+  // What the scan found, written where every step can read it.
+  //
+  // The plan step's column picker used to read this out of `res.preflight`,
+  // the fetch cache that this function happens to fill. That made a column's
+  // safety depend on whether step 1 had rendered yet in this pass - so the
+  // picker could decide nothing was provably safe purely because it ran first,
+  // and then quietly tick nothing. The store is synchronous, survives a
+  // redraw and a page reload, and belongs to the table rather than to a view.
+  //
   // `scanned: false` means the table was skipped, not cleared - the run step
   // has to know the difference.
-  if (st0.preflightGate !== r.gate || st0.preflightScanned !== !!(tb && tb.scanned)) {
-    setTableState(key, { preflightGate: r.gate, preflightScanned: !!(tb && tb.scanned) });
+  const scan = {
+    preflightGate: r.gate,
+    preflightScanned: !!(tb && tb.scanned),
+    preflightCoverage: (tb && tb.coverage) || null,
+    preflightRows: tb && tb.scannedRows !== undefined ? tb.scannedRows : null,
+    preflightColumns: Object.fromEntries(((tb && tb.columns) || [])
+      .map((c) => [c.columnName, { lossy: c.lossyRows, dbl: c.doubleEncodedRows }])),
+  };
+  const st0 = tableState(key);
+  const stale = Object.keys(scan).some((k) => JSON.stringify(st0[k]) !== JSON.stringify(scan[k]));
+  if (stale) {
+    setTableState(key, scan);
     redraw();
     return;
   }
@@ -376,10 +395,6 @@ async function loadPreflight(host, id, announce = false) {
       <button class="btn-sm" id="pf-detail">ดูรายละเอียด</button>
     </div>`;
   $('#pf-detail', box).addEventListener('click', () => showTableDetail(tb, r.target));
-  // The plan step was drawn before this result existed, so its column picker
-  // ticked on charset evidence alone. Now that the scan has landed it can
-  // speak for the rows too.
-  if (planPicker) planPicker();
   if (announce) toast(r.gate === 'block' ? 'ตรวจเสร็จ เจอปัญหาที่ต้องแก้ก่อน' : 'ตรวจเสร็จแล้ว', r.gate === 'block' ? 'err' : 'ok');
 }
 
@@ -588,18 +603,21 @@ function stepPlan(st, at) {
 /* ------------------------------------------ which columns tick themselves */
 
 /**
- * The table row of the latest preflight result, or null when there is no
- * usable scan.
+ * What the latest scan of this table found, or null when there is no usable
+ * one. Read from the store, not from a fetch cache: see loadPreflight().
  *
- * Keyed off the id in the store on purpose: a superseded scan must not keep
- * vouching for a column, and `cached` returns nothing once the operator
- * re-runs step 1 and mints a new id.
+ * A scan that was superseded took its verdict with it - re-running step 1
+ * clears these fields along with the gate - so this can only ever speak for
+ * the id currently in the store.
  */
 function lastScan() {
   const st = tableState(key);
-  const r = st.preflightId ? cached('preflight', st.preflightId) : null;
-  const tb = r ? (r.tables || [])[0] : null;
-  return tb && tb.scanned ? tb : null;
+  if (!st.preflightId || !st.preflightScanned) return null;
+  return {
+    coverage: st.preflightCoverage,
+    scannedRows: st.preflightRows,
+    columns: st.preflightColumns || {},
+  };
 }
 
 /**
@@ -626,16 +644,16 @@ function lastScan() {
  */
 function columnSafety(c) {
   const tb = lastScan();
-  const scan = tb ? (tb.columns || []).find((x) => x.columnName === c.columnName) : null;
+  const scan = tb ? tb.columns[c.columnName] : null;
   const tgt = state.target.charset;
 
-  if (scan && scan.lossyRows > 0) {
+  if (scan && scan.lossy > 0) {
     return { tick: false, tone: 'chip-bad', label: 'ตัวอักษรจะหาย',
-      why: `สแกนเจอ ${num(scan.lossyRows)} แถวที่มีตัวอักษรซึ่ง ${tgt} เก็บไม่ได้ แปลงแล้วกลายเป็น '?' ถาวร` };
+      why: `สแกนเจอ ${num(scan.lossy)} แถวที่มีตัวอักษรซึ่ง ${tgt} เก็บไม่ได้ แปลงแล้วกลายเป็น '?' ถาวร` };
   }
-  if (scan && scan.doubleEncodedRows > 0) {
+  if (scan && scan.dbl > 0) {
     return { tick: false, tone: 'chip-warn', label: 'ไบต์น่าสงสัย',
-      why: `สแกนเจอ ${num(scan.doubleEncodedRows)} แถวที่ไบต์ข้างในเป็น UTF-8 อยู่แล้ว แปลงตรงๆ จะได้ข้อความเพี้ยน` };
+      why: `สแกนเจอ ${num(scan.dbl)} แถวที่ไบต์ข้างในเป็น UTF-8 อยู่แล้ว แปลงตรงๆ จะได้ข้อความเพี้ยน` };
   }
   if (c.generated) {
     return { tick: false, tone: 'chip-warn', label: 'generated',
@@ -645,11 +663,11 @@ function columnSafety(c) {
     return { tick: true, tone: 'chip-ok', label: 'ปลอดภัย',
       why: `${c.columnCharset} เก็บอะไรได้ ${tgt} ก็เก็บได้หมด ไม่ว่าข้างในจะเป็นข้อมูลอะไร` };
   }
-  if (scan && scan.lossyRows === 0 && tb.coverage === 'full') {
+  if (scan && scan.lossy === 0 && tb.coverage === 'full') {
     return { tick: true, tone: 'chip-ok', label: 'สแกนครบแล้ว',
       why: `${c.columnCharset} กว้างกว่า ${tgt} แต่สแกนครบทั้งตารางแล้วไม่เจอตัวอักษรที่เก็บไม่ได้สักแถว` };
   }
-  if (scan && scan.lossyRows === 0) {
+  if (scan && scan.lossy === 0) {
     return { tick: false, tone: 'chip-warn', label: 'ยังพิสูจน์ไม่ได้',
       why: `${c.columnCharset} กว้างกว่า ${tgt} สแกนไปแค่ ${num(tb.scannedRows)} แถวแรกแล้วยังไม่เจออะไร `
         + 'แต่แถวที่เหลือยังไม่ได้ดู ถ้าจะให้ติ๊กให้อัตโนมัติต้องสแกนทั้งตารางที่ขั้น 1' };
@@ -695,7 +713,7 @@ function columnPickerRows() {
 
 function wirePlan(host) {
   const btn = $('#pl-build', host);
-  if (!btn) { planPicker = null; return; }
+  if (!btn) return;
 
   const mode = $('#pl-mode', host);
   const cols = $('#pl-cols', host);
@@ -739,15 +757,17 @@ function wirePlan(host) {
     const unproven = held.filter((c) => !c.lossless && !c.generated);
     const noteBox = $('#pl-colnote', host);
     if (noteBox) {
-      // Why a column is held back matters more than how many are: "scan the
-      // whole table" is useless advice to someone who already did, and whose
-      // result simply has not loaded into this page yet.
-      const why = !lastScan()
-        ? 'หน้านี้ยังไม่มีผลสแกนของตารางนี้ ถ้าเพิ่งสแกนไป ลองเปิดขั้น 1 ให้ผลโหลดขึ้นมาก่อน '
-        : unproven.length
-          ? `อีก ${unproven.length} คอลัมน์เป็น charset ที่กว้างกว่าและยังพิสูจน์ไม่ได้ `
-            + 'ถ้าอยากให้ติ๊กให้เอง ต้องกลับไปสแกนขั้น 1 แบบดูครบทั้งตาราง '
-          : '';
+      // Why a column is held back matters more than how many are, so this
+      // states the evidence on hand rather than assuming which is missing.
+      const tb = lastScan();
+      const why = !tb
+        ? 'ยังไม่มีผลสแกนของตารางนี้ในหน้านี้ ไปที่ขั้น 1 แล้วสแกนก่อน '
+        : tb.coverage !== 'full'
+          ? `สแกนล่าสุดดูไปแค่ ${num(tb.scannedRows)} แถวแรก ไม่ครบทั้งตาราง `
+            + 'ผลแบบนั้นเป็นการสุ่มตรวจ ยังพิสูจน์ไม่ได้ ถ้าอยากให้ติ๊กให้เอง ต้องสแกนแบบดูครบทั้งตาราง '
+          : unproven.length
+            ? `สแกนครบทั้งตารางแล้ว แต่อีก ${unproven.length} คอลัมน์ยังมีแถวที่แปลงแล้วจะเสียตัวอักษร `
+            : '';
       noteBox.innerHTML = held.length
         ? note('info', `เว้นไว้ ${held.length} คอลัมน์`,
           `ติ๊กให้เฉพาะคอลัมน์ที่พิสูจน์แล้วว่าแปลงเป็น ${esc(state.target.charset)} โดยไม่เสียตัวอักษร `
@@ -788,17 +808,22 @@ function wirePlan(host) {
       // nothing. Say which it was.
       if (how !== 'none' && boxes().length && !picked().length) {
         const wired = detail.pendingColumns.filter(isWired).length;
-        toast(how === 'keys' && wired
-          ? `มีคอลัมน์คีย์/index อยู่ ${wired} คอลัมน์ แต่ยังไม่มีอันไหนพิสูจน์ได้ว่าแปลงแล้วไม่เสียตัวอักษร`
+        const tb = lastScan();
+        const evidence = !tb
+          ? ' — ยังไม่มีผลสแกนของตารางนี้ ไปสแกนที่ขั้น 1 ก่อน'
+          : tb.coverage !== 'full'
+            ? ` — สแกนล่าสุดดูไปแค่ ${num(tb.scannedRows)} แถวแรก ต้องสแกนครบทั้งตารางถึงจะพิสูจน์ได้`
+            : '';
+        toast((how === 'keys' && !wired
+          ? 'ตารางนี้ไม่มีคอลัมน์ข้อความที่เป็นคีย์หรืออยู่ใน index'
           : how === 'keys'
-            ? 'ตารางนี้ไม่มีคอลัมน์ข้อความที่เป็นคีย์หรืออยู่ใน index'
-            : `ยังไม่มีคอลัมน์ไหนพิสูจน์ได้ว่าแปลงเป็น ${state.target.charset} ได้โดยไม่เสียตัวอักษร`,
-        'warn', 7000);
+            ? `มีคอลัมน์คีย์/index อยู่ ${wired} คอลัมน์ แต่ยังไม่มีอันไหนพิสูจน์ได้ว่าแปลงแล้วไม่เสียตัวอักษร`
+            : `ยังไม่มีคอลัมน์ไหนพิสูจน์ได้ว่าแปลงเป็น ${state.target.charset} ได้โดยไม่เสียตัวอักษร`) + evidence,
+        'warn', 9000);
       }
     });
   }
   applyDefaults();
-  planPicker = applyDefaults;
 
   btn.addEventListener('click', async () => {
     btn.disabled = true;
