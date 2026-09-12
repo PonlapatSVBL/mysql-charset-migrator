@@ -9,6 +9,7 @@ import {
   work, tableState, setTableState, openTable, resetTable, splitKey, tableBody, nextStep,
   invalidateInventory,
 } from '../store.js';
+import { columnSafety as safetyOf, isWired, SHORT_CODE_LEN } from '../columns.js';
 import { navigate } from '../app.js';
 import {
   $, $$, esc, num, pct, bytes, duration, note, chip, toast, applyDynamicStyles, showModal,
@@ -620,6 +621,9 @@ function stepPlan(st, at) {
 
 /* ------------------------------------------ which columns tick themselves */
 
+/** This table's verdict for one column: same rule, this table's scan. */
+const safety = (c) => safetyOf(c, lastScan(), state.target.charset);
+
 /**
  * What the latest scan of this table found, or null when there is no usable
  * one. Read from the store, not from a fetch cache: see loadPreflight().
@@ -638,128 +642,12 @@ function lastScan() {
   };
 }
 
-/**
- * Why one column is, or is not, ticked for the operator.
- *
- * The old default ticked `*_id` and nothing else - right about what breaks
- * first (a join, once two collations drift apart) but far too narrow: it
- * missed the rest of every index, missed foreign keys, and left the table in a
- * mixed-charset state nobody asked for.
- *
- * Proof comes from exactly two places:
- *
- *  1. The charset. latin1, tis620, ucs2, utf8mb3 itself - none of them can
- *     hold anything the target cannot, whatever sits in the rows. That is the
- *     server's `lossless`, and it needs no scan at all.
- *  2. The scan, but only when it read every row. Zero lossy rows out of the
- *     first 200,000 of 40M is a sample; zero out of all of them is a proof.
- *
- * Demanding proof and nothing less was the first attempt, and it was wrong:
- * the default scan is capped at 200,000 rows, so on every table big enough to
- * care about, nothing was provable and the picker ticked nothing at all - worse
- * than the *_id rule it replaced, which at least ticked something.
- *
- * So there is a third tier, for a column the scan read and found clean without
- * reaching the end of the table. That is evidence, not proof, and it is enough
- * only for a column the schema wires into a key, an index or a foreign key.
- * Those hold identifiers - codes, statuses, keys - and an identifier that was
- * ever going to hold a character outside the target would almost certainly
- * have shown one in the 200,000 rows already read. Free text is the opposite
- * case, and free text is exactly where an emoji turns up on row 3,000,001, so
- * an unwired column stays clear until the scan reaches the end.
- *
- * A column the scan found lossy rows in is never ticked - nor one whose bytes
- * look double-encoded, where the conversion succeeds and quietly returns
- * mojibake - even when rule 1 would have allowed it.
- */
-function columnSafety(c) {
-  const tb = lastScan();
-  const scan = tb ? tb.columns[c.columnName] : null;
-  const tgt = state.target.charset;
 
-  if (scan && scan.lossy > 0) {
-    return { tick: false, tone: 'chip-bad', label: 'ตัวอักษรจะหาย',
-      why: `สแกนเจอ ${num(scan.lossy)} แถวที่มีตัวอักษรซึ่ง ${tgt} เก็บไม่ได้ แปลงแล้วกลายเป็น '?' ถาวร` };
-  }
-  if (scan && scan.dbl > 0) {
-    return { tick: false, tone: 'chip-warn', label: 'ไบต์น่าสงสัย',
-      why: `สแกนเจอ ${num(scan.dbl)} แถวที่ไบต์ข้างในเป็น UTF-8 อยู่แล้ว แปลงตรงๆ จะได้ข้อความเพี้ยน` };
-  }
-  if (c.generated) {
-    return { tick: false, tone: 'chip-warn', label: 'generated',
-      why: 'generated column MySQL มักปฏิเสธการแปลง charset ต้อง drop แล้วสร้างใหม่เอง' };
-  }
-  if (c.lossless) {
-    return { tick: true, proven: true, tone: 'chip-ok', label: 'ปลอดภัย',
-      why: `${c.columnCharset} เก็บอะไรได้ ${tgt} ก็เก็บได้หมด ไม่ว่าข้างในจะเป็นข้อมูลอะไร` };
-  }
-  if (scan && scan.lossy === 0 && tb.coverage === 'full') {
-    return { tick: true, proven: true, tone: 'chip-ok', label: 'สแกนครบแล้ว',
-      why: `${c.columnCharset} กว้างกว่า ${tgt} แต่สแกนครบทั้งตารางแล้วไม่เจอตัวอักษรที่เก็บไม่ได้สักแถว` };
-  }
-  if (scan && scan.lossy === 0) {
-    const reason = isWired(c) ? 'เป็นคีย์หรืออยู่ใน index จึงเก็บรหัส/สถานะ ไม่ใช่ข้อความอิสระ'
-      : isShortCode(c) ? `เป็น ${c.dataType}(${num(c.charMaxLen)}) สั้นเกินกว่าจะถูกใช้เก็บข้อความอิสระ`
-        : null;
-    return {
-      tick: !!reason,
-      proven: false,
-      tone: reason ? 'chip-warn' : 'chip-none',
-      label: reason ? `สะอาดใน ${num(tb.scannedRows)} แถว` : 'ยังพิสูจน์ไม่ได้',
-      why: `${c.columnCharset} กว้างกว่า ${tgt} สแกนไปแค่ ${num(tb.scannedRows)} แถวแรกแล้วยังไม่เจออะไร `
-        + 'แต่แถวที่เหลือยังไม่ได้ดู '
-        + (reason
-          ? `ติ๊กให้เพราะคอลัมน์นี้${reason} ถ้าอยากได้ความแน่นอน ให้สแกนทั้งตารางที่ขั้น 1`
-          : 'ไม่ติ๊กให้เพราะเป็นข้อความอิสระ ซึ่งเป็นที่ที่ emoji โผล่ได้ในแถวที่ยังไม่ได้ดู'),
-    };
-  }
-  return { tick: false, proven: false, tone: 'chip-warn', label: 'ยังไม่ได้ตรวจ',
-    why: `${c.columnCharset} กว้างกว่า ${tgt} และยังไม่มีผลสแกนของคอลัมน์นี้` };
-}
 
-/**
- * A field too narrow to be prose.
- *
- * Not because an emoji would not fit - one character fits anywhere - but
- * because of what a field this size is declared FOR. Nobody sizes a column at
- * twenty characters and then stores a sentence, a comment or a customer's
- * display name in it; they store a code, a status, a document number, a
- * currency or country abbreviation. That is the same content a key column
- * holds, so it earns the same treatment in the evidence tier: a clean capped
- * scan is enough for it, and a scan that found damage still vetoes it.
- *
- * `char` counts alongside `varchar` - the same shape, declared even more
- * deliberately. The longer types never reach this test: tinytext alone is 255.
- */
-const SHORT_CODE_LEN = 20;
-
-function isShortCode(c) {
-  return /^(char|varchar)$/i.test(String(c.dataType || ''))
-    && Number(c.charMaxLen) > 0
-    && Number(c.charMaxLen) <= SHORT_CODE_LEN;
-}
-
-/**
- * The wiring a collation mismatch actually breaks: joins, lookups, FKs.
- *
- * `indexed` is the good signal - it counts every index the column appears in,
- * including the parts of a composite that COLUMN_KEY never mentions. But it
- * arrives from the server, and a browser gets fresh static files while the API
- * is still whatever the running process loaded at startup; a column that MySQL
- * itself marks PRI/UNI/MUL must not read as unwired just because the two ends
- * are a restart apart. So `columnKey` stands behind it, and the name behind
- * that.
- */
-function isWired(c) {
-  return !!(c.indexed
-    || c.columnKey
-    || (c.foreignKeyNames && c.foreignKeyNames.length)
-    || /_id$/i.test(c.columnName));
-}
 
 function columnPickerRows() {
   return detail.pendingColumns.map((c) => {
-    const s = columnSafety(c);
+    const s = safety(c);
     const wiring = [
       c.columnKey ? chip(c.columnKey, 'chip-info') : (c.indexed ? chip('idx', 'chip-info') : ''),
       c.foreignKeyNames && c.foreignKeyNames.length ? chip('FK', 'chip-info') : '',
@@ -816,7 +704,7 @@ function wirePlan(host) {
    *  is half of what decides which columns are safe. */
   const applyDefaults = () => {
     if (list) list.innerHTML = columnPickerRows();
-    const verdicts = detail.pendingColumns.map((c) => columnSafety(c));
+    const verdicts = detail.pendingColumns.map((c) => safety(c));
     const held = verdicts.filter((v) => !v.tick).length;
     const onEvidence = verdicts.filter((v) => v.tick && !v.proven).length;
     const tb = lastScan();
@@ -866,7 +754,7 @@ function wirePlan(host) {
       const how = b.dataset.pick;
       for (const box of boxes()) {
         const col = colByName(box.dataset.col);
-        const safe = !!col && columnSafety(col).tick;
+        const safe = !!col && safety(col).tick;
         box.checked = how === 'all' ? true
           : how === 'none' ? false
             : how === 'safe' ? safe

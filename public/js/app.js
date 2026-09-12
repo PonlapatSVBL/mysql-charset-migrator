@@ -6,6 +6,7 @@ import * as overviewView from './views/overview.js';
 import * as inventoryView from './views/inventory.js';
 import * as tablesView from './views/tables.js';
 import * as tableView from './views/table.js';
+import * as autoView from './views/auto.js';
 import * as jobsView from './views/jobs.js';
 import * as logsView from './views/logs.js';
 
@@ -16,6 +17,8 @@ const ROUTES = {
   // Not in the sidebar: it is always entered from the work list, and it needs
   // a table to be about.
   table: { title: 'แปลงตาราง', view: tableView, hidden: true },
+  // Also entered from the work list, and only meaningful with a queue behind it.
+  auto: { title: 'รันอัตโนมัติ', view: autoView, hidden: true },
   inventory: { title: 'ค้นหาคอลัมน์', view: inventoryView },
   jobs: { title: 'งานที่รันไปแล้ว', view: jobsView },
   logs: { title: 'บันทึกการทำงาน', view: logsView },

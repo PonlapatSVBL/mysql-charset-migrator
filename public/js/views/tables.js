@@ -52,6 +52,7 @@ export async function render(host, params) {
       <div class="row-tight">
         <div class="segbar" id="tl-status"></div>
         <div class="spacer"></div>
+        <button class="btn-sm" id="tl-auto">▶ รันอัตโนมัติ…</button>
         <button class="btn-sm btn-ghost" id="tl-export">ดาวน์โหลดเป็น Excel</button>
       </div>
     </div>
@@ -78,6 +79,12 @@ export async function render(host, params) {
     ui.sort = sort; ui.dir = dir; ui.page = 1;
     load(host);
   });
+
+  // Carries the filters across, so the queue is the list being looked at right
+  // now rather than every table on the instance.
+  $('#tl-auto', host).addEventListener('click', () => navigate('auto', {
+    filters: { schema: ui.filters.schema, engine: ui.filters.engine, q: ui.filters.q },
+  }));
 
   // The export is the list you are looking at, minus the paging: same filters,
   // every matching row. Exporting page 1 of 17 would be a quietly wrong answer.
