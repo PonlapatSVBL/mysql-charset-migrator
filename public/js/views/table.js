@@ -17,6 +17,10 @@ import {
 let key = null;
 let detail = null;
 let timers = [];
+// Set by wirePlan. The scan is half of what decides which columns are safe to
+// convert, and it lands after the step is drawn - this re-runs the default tick
+// once it does.
+let planPicker = null;
 
 /**
  * Fetched payloads for the currently open table. Keyed by the id they came
@@ -372,6 +376,10 @@ async function loadPreflight(host, id, announce = false) {
       <button class="btn-sm" id="pf-detail">ดูรายละเอียด</button>
     </div>`;
   $('#pf-detail', box).addEventListener('click', () => showTableDetail(tb, r.target));
+  // The plan step was drawn before this result existed, so its column picker
+  // ticked on charset evidence alone. Now that the scan has landed it can
+  // speak for the rows too.
+  if (planPicker) planPicker();
   if (announce) toast(r.gate === 'block' ? 'ตรวจเสร็จ เจอปัญหาที่ต้องแก้ก่อน' : 'ตรวจเสร็จแล้ว', r.gate === 'block' ? 'err' : 'ok');
 }
 
@@ -501,6 +509,7 @@ async function loadChecksum(host, id, announce = false) {
     if (task.status === 'running') { watchTask(host, 'checksum', id); return; }
     r = task.result;
     if (!r) { if (box) box.innerHTML = `<div class="note note-crit">${esc(task.error || 'ไม่มีผลลัพธ์')}</div>`; return; }
+    r.legacy = !!task.legacy;
     cache('checksum', id, r);
   }
   const tb = r.tables[key];
@@ -508,6 +517,9 @@ async function loadChecksum(host, id, announce = false) {
   if (!tb) { box.innerHTML = note('warn', null, 'ใน snapshot นี้ไม่มีข้อมูลของตารางนี้'); return; }
   box.innerHTML = `
     ${note('ok', 'เก็บแล้ว', `${esc(strategyLabel(tb.strategy))} · ${tb.scannedRows !== undefined ? `${num(tb.scannedRows)} แถว` : `${num(tb.rowCount)} แถว`} · ${esc(duration(tb.durationMs))}`)}
+    ${r.legacy ? note('warn', 'baseline เก่าก่อนแยกเครื่อง',
+    'ไฟล์นี้ถูกเก็บตอนที่บันทึกยังไม่ได้แยกตามเครื่องปลายทาง จึงไม่มีอะไรยืนยันได้ว่ามาจากฐานข้อมูลเดียวกับที่ต่ออยู่ตอนนี้ '
+    + 'ถ้าจะใช้เทียบผลหลังแปลง ควรเก็บ baseline ใหม่ที่ขั้น 2 ก่อน') : ''}
     <div class="row-tight">
       <span class="hint mono trunc" title="${esc(tb.digest)}">${esc(tb.digest)}</span>
       <div class="spacer"></div>
@@ -535,39 +547,36 @@ function stepPlan(st, at) {
     locked,
     lockReason: 'เก็บ baseline ที่ขั้น 2 ก่อน',
     body: `
+      <label class="field"><span>จะทำอะไรกับตารางนี้</span>
+        <select id="pl-mode">
+          <option value="columns" selected>แปลงข้อมูลเฉพาะคอลัมน์ที่ติ๊ก (แนะนำ)</option>
+          <option value="table">แปลงทุกคอลัมน์ข้อความด้วย CONVERT TO ทั้งตาราง</option>
+          <option value="defaults">แก้แค่ default ของ schema/ตาราง ไม่แตะข้อมูลเดิม</option>
+        </select></label>
+      <div id="pl-modenote"></div>
+      <label class="check"><input type="checkbox" id="pl-schemadef">
+        แก้ default ของ schema <span class="mono">${esc(splitKey(key).schemaName)}</span> ด้วย ตัวนี้กระทบทุกตารางที่จะสร้างใน schema นี้</label>
       ${detail.pendingColumns.length ? `
       <div class="field" id="pl-cols">
         <span>คอลัมน์ที่จะแปลง <span class="hint" id="pl-colcount"></span></span>
-        <div class="collist">${detail.pendingColumns.map((c) => `
-          <label class="check" title="${esc(c.columnCharset)} / ${esc(c.columnCollation)}">
-            <input type="checkbox" data-col="${esc(c.columnName)}"${isIdColumn(c.columnName) ? ' checked' : ''}>
-            <span class="mono">${esc(c.columnName)}</span>
-            <span class="hint mono trunc">${esc(c.columnType)}</span>
-            ${c.columnKey ? chip(c.columnKey, 'chip-info') : ''}
-          </label>`).join('')}</div>
+        <div class="collist" id="pl-collist"></div>
         <div class="row-tight">
-          <button class="btn-sm btn-ghost" data-pick="id">เฉพาะ *_id</button>
+          <button class="btn-sm btn-ghost" data-pick="safe">ที่ปลอดภัย</button>
+          <button class="btn-sm btn-ghost" data-pick="keys">เฉพาะคีย์ / index</button>
           <button class="btn-sm btn-ghost" data-pick="all">ทั้งหมด</button>
           <button class="btn-sm btn-ghost" data-pick="none">ล้าง</button>
         </div>
+        <div id="pl-colnote"></div>
       </div>` : ''}
-      ${collapse('ตัวเลือกขั้นสูง', `
+      <div id="pl-advanced">${collapse('ตัวเลือกขั้นสูง', `
         <div class="row">
-          <label class="field"><span>วิธีแปลง</span>
-            <select id="pl-strategy">
-              <option value="modify_columns" selected>MODIFY COLUMN ทีละคอลัมน์ (แนะนำ)</option>
-              <option value="convert_table">CONVERT TO CHARACTER SET ทั้งตาราง</option>
-            </select></label>
           <label class="field"><span>สำรองก่อนแปลง</span>
             <select id="pl-backup">
               <option value="none" selected>ไม่สำรอง (ย้อนได้แค่โครงสร้าง ไม่ได้ข้อมูล)</option>
               <option value="table_copy">ก๊อปตารางไว้ในฐานข้อมูล (ย้อนกลับเร็วสุด)</option>
               <option value="mysqldump">mysqldump ลงไฟล์</option>
             </select></label>
-          <div class="field"><span>&nbsp;</span>
-            <label class="check"><input type="checkbox" id="pl-schemadef"> แก้ default ของ schema ด้วย ตัวนี้กระทบทั้ง schema</label>
-          </div>
-        </div>`)}
+        </div>`)}</div>
       <div class="row-tight">
         <button class="btn-primary" id="pl-build">${st.planId ? 'สร้างใหม่' : 'สร้างคำสั่ง'}</button>
         <span class="hint" id="pl-status"></span>
@@ -576,45 +585,204 @@ function stepPlan(st, at) {
   });
 }
 
-/** The default tick: id columns are the ones a join breaks on when the
- *  collations drift apart, so they are what an operator almost always means. */
-function isIdColumn(name) {
-  return /_id$/i.test(name);
+/* ------------------------------------------ which columns tick themselves */
+
+/**
+ * The table row of the latest preflight result, or null when there is no
+ * usable scan.
+ *
+ * Keyed off the id in the store on purpose: a superseded scan must not keep
+ * vouching for a column, and `cached` returns nothing once the operator
+ * re-runs step 1 and mints a new id.
+ */
+function lastScan() {
+  const st = tableState(key);
+  const r = st.preflightId ? cached('preflight', st.preflightId) : null;
+  const tb = r ? (r.tables || [])[0] : null;
+  return tb && tb.scanned ? tb : null;
+}
+
+/**
+ * Why one column is, or is not, ticked for the operator.
+ *
+ * The old default ticked `*_id` and nothing else - right about what breaks
+ * first (a join, once two collations drift apart) but far too narrow: it
+ * missed the rest of every index, missed foreign keys, and left the table in a
+ * mixed-charset state nobody asked for.
+ *
+ * The rule now is to tick a column when narrowing it is PROVEN not to lose a
+ * character, and never otherwise. Proof comes from exactly two places:
+ *
+ *  1. The charset. latin1, tis620, ucs2, utf8mb3 itself - none of them can
+ *     hold anything the target cannot, whatever sits in the rows. That is the
+ *     server's `lossless`, and it needs no scan at all.
+ *  2. The scan, but only when it read every row. Zero lossy rows out of the
+ *     first 200,000 of 40M is a sample; zero out of all of them is a proof. A
+ *     capped scan leaves the possibility standing, so the column stays clear.
+ *
+ * A column the scan found lossy rows in is never ticked - nor one whose bytes
+ * look double-encoded, where the conversion succeeds and quietly returns
+ * mojibake - even when rule 1 would have allowed it.
+ */
+function columnSafety(c) {
+  const tb = lastScan();
+  const scan = tb ? (tb.columns || []).find((x) => x.columnName === c.columnName) : null;
+  const tgt = state.target.charset;
+
+  if (scan && scan.lossyRows > 0) {
+    return { tick: false, tone: 'chip-bad', label: 'ตัวอักษรจะหาย',
+      why: `สแกนเจอ ${num(scan.lossyRows)} แถวที่มีตัวอักษรซึ่ง ${tgt} เก็บไม่ได้ แปลงแล้วกลายเป็น '?' ถาวร` };
+  }
+  if (scan && scan.doubleEncodedRows > 0) {
+    return { tick: false, tone: 'chip-warn', label: 'ไบต์น่าสงสัย',
+      why: `สแกนเจอ ${num(scan.doubleEncodedRows)} แถวที่ไบต์ข้างในเป็น UTF-8 อยู่แล้ว แปลงตรงๆ จะได้ข้อความเพี้ยน` };
+  }
+  if (c.generated) {
+    return { tick: false, tone: 'chip-warn', label: 'generated',
+      why: 'generated column MySQL มักปฏิเสธการแปลง charset ต้อง drop แล้วสร้างใหม่เอง' };
+  }
+  if (c.lossless) {
+    return { tick: true, tone: 'chip-ok', label: 'ปลอดภัย',
+      why: `${c.columnCharset} เก็บอะไรได้ ${tgt} ก็เก็บได้หมด ไม่ว่าข้างในจะเป็นข้อมูลอะไร` };
+  }
+  if (scan && scan.lossyRows === 0 && tb.coverage === 'full') {
+    return { tick: true, tone: 'chip-ok', label: 'สแกนครบแล้ว',
+      why: `${c.columnCharset} กว้างกว่า ${tgt} แต่สแกนครบทั้งตารางแล้วไม่เจอตัวอักษรที่เก็บไม่ได้สักแถว` };
+  }
+  if (scan && scan.lossyRows === 0) {
+    return { tick: false, tone: 'chip-warn', label: 'ยังพิสูจน์ไม่ได้',
+      why: `${c.columnCharset} กว้างกว่า ${tgt} สแกนไปแค่ ${num(tb.scannedRows)} แถวแรกแล้วยังไม่เจออะไร `
+        + 'แต่แถวที่เหลือยังไม่ได้ดู ถ้าจะให้ติ๊กให้อัตโนมัติต้องสแกนทั้งตารางที่ขั้น 1' };
+  }
+  return { tick: false, tone: 'chip-warn', label: 'ยังไม่ได้ตรวจ',
+    why: `${c.columnCharset} กว้างกว่า ${tgt} และยังไม่มีผลสแกนของคอลัมน์นี้` };
+}
+
+/** The wiring a collation mismatch actually breaks: joins, lookups, FKs. */
+function isWired(c) {
+  return !!(c.indexed || (c.foreignKeyNames && c.foreignKeyNames.length) || /_id$/i.test(c.columnName));
+}
+
+function columnPickerRows() {
+  return detail.pendingColumns.map((c) => {
+    const s = columnSafety(c);
+    const wiring = [
+      c.columnKey ? chip(c.columnKey, 'chip-info') : (c.indexed ? chip('idx', 'chip-info') : ''),
+      c.foreignKeyNames && c.foreignKeyNames.length ? chip('FK', 'chip-info') : '',
+    ].join('');
+    return `
+      <label class="check" title="${esc(c.columnCharset)} / ${esc(c.columnCollation)} — ${esc(s.why)}">
+        <input type="checkbox" data-col="${esc(c.columnName)}"${s.tick ? ' checked' : ''}>
+        <span class="mono">${esc(c.columnName)}</span>
+        <span class="hint mono trunc">${esc(c.columnType)}</span>
+        ${wiring}${chip(s.label, s.tone)}
+      </label>`;
+  }).join('');
 }
 
 function wirePlan(host) {
   const btn = $('#pl-build', host);
-  if (!btn) return;
+  if (!btn) { planPicker = null; return; }
 
-  const boxes = $$('#pl-cols input[data-col]', host);
-  const picked = () => boxes.filter((b) => b.checked).map((b) => b.dataset.col);
+  const mode = $('#pl-mode', host);
+  const cols = $('#pl-cols', host);
+  const list = $('#pl-collist', host);
   const count = $('#pl-colcount', host);
-  const sel = $('#pl-strategy', host);
-  const sync = () => {
-    // CONVERT TO rewrites every column whatever is ticked, so the picker is
-    // only honest while MODIFY COLUMN is the strategy.
-    const cols = $('#pl-cols', host);
-    if (cols) cols.hidden = sel.value !== 'modify_columns';
-    if (count) count.textContent = `${picked().length}/${boxes.length}`;
+  const boxes = () => $$('#pl-collist input[data-col]', host);
+  const picked = () => boxes().filter((b) => b.checked).map((b) => b.dataset.col);
+  const colByName = (n) => detail.pendingColumns.find((x) => x.columnName === n);
+
+  const MODE_NOTE = {
+    columns: () => '',
+    table: () => note('info', 'CONVERT TO ทั้งตาราง',
+      'คำสั่งเดียวแปลงคอลัมน์ข้อความทุกคอลัมน์ของตารางนี้ รวมคอลัมน์ที่ยังพิสูจน์ไม่ได้ว่าจะไม่เสียตัวอักษรด้วย '
+      + 'ให้ใช้ต่อเมื่อสแกนขั้น 1 ผ่านแบบดูครบทั้งตารางแล้วเท่านั้น'),
+    defaults: () => note('info', 'แก้แค่ metadata ไม่เขียนข้อมูลใหม่',
+      'จะได้แค่ <code>ALTER TABLE … DEFAULT CHARACTER SET</code> และ <code>ALTER DATABASE …</code> ถ้าติ๊กไว้ในตัวเลือกขั้นสูง '
+      + 'ทำงานทันที ไม่ rebuild ไม่ล็อกการเขียน คอลัมน์เดิมยังเป็น charset/collation เดิมครบทุกคอลัมน์ '
+      + `ตารางและคอลัมน์ที่สร้าง<strong>หลังจากนี้</strong>จะได้ <code>${esc(state.target.charset)} / ${esc(state.target.collation)}</code> เป็นค่าตั้งต้นเอง `
+      + 'ข้อแลกเปลี่ยนคือตารางจะมี charset ปนกัน การ JOIN ระหว่างคอลัมน์เก่ากับคอลัมน์ใหม่ยังชนกันเรื่อง collation อยู่'),
   };
-  for (const b of boxes) b.addEventListener('change', sync);
-  sel.addEventListener('change', sync);
-  for (const b of $$('#pl-cols [data-pick]', host)) {
-    b.addEventListener('click', () => {
-      for (const c of boxes) c.checked = b.dataset.pick === 'all' || (b.dataset.pick === 'id' && isIdColumn(c.dataset.col));
+
+  const sync = () => {
+    // The picker is honest only while MODIFY COLUMN does the work: CONVERT TO
+    // rewrites every column whatever is ticked, and the metadata-only mode
+    // rewrites none of them.
+    if (cols) cols.hidden = mode.value !== 'columns';
+    // Metadata-only has nothing to back up: rollback is the one ALTER that put
+    // the old default back, and it never touched a row.
+    const adv = $('#pl-advanced', host);
+    if (adv) adv.hidden = mode.value === 'defaults';
+    const mn = $('#pl-modenote', host);
+    if (mn) mn.innerHTML = MODE_NOTE[mode.value]();
+    if (count) count.textContent = `${picked().length}/${boxes().length}`;
+  };
+
+  /** Tick from scratch. Runs again when a scan result lands, because the scan
+   *  is half of what decides which columns are safe. */
+  const applyDefaults = () => {
+    if (list) list.innerHTML = columnPickerRows();
+    const held = detail.pendingColumns.filter((c) => !columnSafety(c).tick);
+    const unproven = held.filter((c) => !c.lossless && !c.generated);
+    const noteBox = $('#pl-colnote', host);
+    if (noteBox) {
+      noteBox.innerHTML = held.length
+        ? note('info', `เว้นไว้ ${held.length} คอลัมน์`,
+          `ติ๊กให้เฉพาะคอลัมน์ที่พิสูจน์แล้วว่าแปลงเป็น ${esc(state.target.charset)} โดยไม่เสียตัวอักษร `
+          + (unproven.length
+            ? `อีก ${unproven.length} คอลัมน์เป็น charset ที่กว้างกว่าและยังพิสูจน์ไม่ได้ `
+              + 'ถ้าอยากให้ติ๊กให้เอง ต้องกลับไปสแกนขั้น 1 แบบดูครบทั้งตาราง '
+            : '')
+          + 'ติ๊กเองได้ถ้ารู้ว่าข้อมูลข้างในปลอดภัย')
+        : '';
+    }
+    sync();
+  };
+
+  mode.addEventListener('change', () => {
+    // The point of this mode is that whatever gets created from here on is
+    // born with the target default - which is the schema's job as much as the
+    // table's. Tick it where the operator can see it happen and untick it.
+    if (mode.value === 'defaults') {
+      const sd = $('#pl-schemadef', host);
+      if (sd) sd.checked = true;
+    }
+    sync();
+  });
+  if (cols) {
+    // Delegated: applyDefaults swaps the rows out from under any listener
+    // bound to an individual checkbox.
+    cols.addEventListener('change', (e) => { if (e.target.matches('input[data-col]')) sync(); });
+    cols.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-pick]');
+      if (!b) return;
+      const how = b.dataset.pick;
+      for (const box of boxes()) {
+        const col = colByName(box.dataset.col);
+        const safe = !!col && columnSafety(col).tick;
+        box.checked = how === 'all' ? true
+          : how === 'none' ? false
+            : how === 'safe' ? safe
+              : safe && isWired(col);
+      }
       sync();
     });
   }
-  sync();
+  applyDefaults();
+  planPicker = applyDefaults;
 
   btn.addEventListener('click', async () => {
     btn.disabled = true;
     $('#pl-status', host).textContent = 'กำลังสร้างคำสั่ง…';
+    const m = mode.value;
     try {
       const { planId, plan } = await api.plan(tableBody(key, {
-        strategy: sel.value,
-        columns: sel.value === 'modify_columns' ? picked() : undefined,
-        backupStrategy: $('#pl-backup', host).value,
+        // Converting nothing is a real answer, not a missing one: an empty
+        // column list is exactly what reduces the plan to the metadata-only
+        // pair of ALTERs that the "defaults" mode promises.
+        strategy: m === 'table' ? 'convert_table' : 'modify_columns',
+        columns: m === 'columns' ? picked() : m === 'defaults' ? [] : undefined,
+        backupStrategy: m === 'defaults' ? 'none' : $('#pl-backup', host).value,
         includeSchemaDefaults: $('#pl-schemadef', host).checked,
         includeTableDefaults: true,
         order: 'size_asc',

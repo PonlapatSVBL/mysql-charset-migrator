@@ -81,8 +81,14 @@ module.exports = {
     oneTableAtATime: process.env.CSMIG_ALLOW_BULK !== '1',
   },
 
+  // Everything written about a real database is filed under the endpoint it
+  // came from: data/hosts/<host>_<port>/{audit,jobs,plans,snapshots}. The four
+  // flat directories below are the pre-split history - read for old records,
+  // never written to again - plus data/audit, which keeps the events that
+  // belong to this process rather than to any endpoint. See server/lib/store.js.
   paths: {
     data: path.join(__dirname, 'data'),
+    hosts: path.join(__dirname, 'data', 'hosts'),
     audit: path.join(__dirname, 'data', 'audit'),
     jobs: path.join(__dirname, 'data', 'jobs'),
     snapshots: path.join(__dirname, 'data', 'snapshots'),

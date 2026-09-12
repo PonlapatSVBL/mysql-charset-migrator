@@ -3,6 +3,7 @@ const express = require('express');
 const config = require('../../config');
 const session = require('../session');
 const log = require('../lib/logger');
+const store = require('../lib/store');
 const queries = require('../lib/queries');
 const sqlgen = require('../lib/sqlgen');
 const preflight = require('../lib/preflight');
@@ -66,7 +67,9 @@ router.post('/connect', asyncHandler(async (req, res) => {
     const sess = await session.create({ host: String(host), port, user: String(user), password: String(password || ''), database, ssl });
     res.json(session.publicView(sess));
   } catch (err) {
-    log.audit('session.connect.failed', { host, user, error: err.message, code: err.code });
+    // A refused login is evidence about that endpoint, so it is filed there
+    // even though no session ever existed to carry it.
+    log.auditFor({ host: String(host), port }, 'session.connect.failed', { host, user, error: err.message, code: err.code });
     res.status(err.status || 400).json({ error: `เชื่อมต่อไม่สำเร็จ: ${err.message}`, code: err.code });
   }
 }));
@@ -138,7 +141,7 @@ router.get('/inventory.csv', requireSession, asyncHandler(async (req, res) => {
   res.write('﻿' + cols.join(',') + '\n');
   for (const r of rows) res.write(cols.map((c) => esc(r[c])).join(',') + '\n');
   res.end();
-  log.audit('inventory.export', { sessionId: req.sess.id, rows: rows.length });
+  log.auditFor(req.sess, 'inventory.export', { sessionId: req.sess.id, rows: rows.length });
 }));
 
 /* ------------------------------------------------------------ table list */
@@ -229,7 +232,7 @@ router.get('/export/tables.xlsx', requireSession, asyncHandler(async (req, res) 
   res.setHeader('Content-Disposition', `attachment; filename="charset-tables-${stamp}.xlsx"`);
   res.setHeader('Content-Length', buf.length);
   res.end(buf);
-  log.audit('tables.export', { sessionId: req.sess.id, rows: rows.length, status, target });
+  log.auditFor(req.sess, 'tables.export', { sessionId: req.sess.id, rows: rows.length, status, target });
 }));
 
 /** Everything the single-table workspace needs, in one round trip. */
@@ -267,13 +270,49 @@ router.get('/tables/:schema/:table', requireSession, asyncHandler(async (req, re
       },
       checksumPlan,
     },
-    pendingColumns: pending.map((c) => ({
-      columnName: c.columnName, columnType: c.columnType, dataType: c.dataType,
-      columnCharset: c.columnCharset, columnCollation: c.columnCollation,
-      columnKey: c.columnKey, charMaxLen: c.charMaxLen,
-    })),
+    // Enough per-column context for the workspace to pick a sane default set
+    // without a second round trip: what the column is wired into (an index, a
+    // foreign key - the places a collation mismatch actually breaks a query),
+    // and whether narrowing it to the target charset can lose a character at
+    // all. `lossless` is a statement about the charset, not about the rows;
+    // the preflight scan is what speaks for the rows.
+    pendingColumns: pending.map((c) => {
+      const idx = (meta.indexes || []).filter((i) => i.parts.some((p) => p.columnName === c.columnName));
+      const fks = (meta.foreignKeys || []).filter((f) =>
+        (f.direction === 'outbound' && f.columnName === c.columnName)
+        || (f.direction === 'inbound' && f.refColumn === c.columnName));
+      return {
+        columnName: c.columnName, columnType: c.columnType, dataType: c.dataType,
+        columnCharset: c.columnCharset, columnCollation: c.columnCollation,
+        columnKey: c.columnKey, charMaxLen: c.charMaxLen,
+        generated: !!(c.generationExpression && String(c.generationExpression).length),
+        lossless: sqlgen.repertoireFits(c.columnCharset, target.charset),
+        indexNames: idx.map((i) => i.indexName),
+        indexed: idx.length > 0,
+        uniqueIndexed: idx.some((i) => i.unique),
+        foreignKeyNames: [...new Set(fks.map((f) => f.name))],
+      };
+    }),
   });
 }));
+
+/**
+ * "Not found here" with a reason, when there is one.
+ *
+ * An id that exists under a different endpoint is not a missing file, it is an
+ * operator holding the wrong window - and saying so is the whole point of
+ * filing artifacts per host.
+ */
+function foreignOr(sess, kind, id, what) {
+  return store.foreignError(sess, kind, id, what) || `ไม่พบ${what} ${id} ที่ ${store.label(sess)}`;
+}
+
+/** Archived scan results for this endpoint, newest ids last as before. */
+function archivedSnapshots(sess, prefix) {
+  return store.listJson(sess, 'snapshots')
+    .filter((e) => e.id.startsWith(prefix))
+    .map((e) => (e.legacy ? { id: e.id, legacy: true } : e.id));
+}
 
 /* --------------------------------------------------------------- preflight */
 
@@ -327,30 +366,35 @@ router.post('/preflight', requireSession, asyncHandler(async (req, res) => {
     checkDoubleEncoding: req.body.checkDoubleEncoding !== false,
     sampleSize: req.body.sampleSize || 5,
   };
-  const task = tasks.create('preflight', req.sess.id, {
+  const task = tasks.create('preflight', req.sess, {
     total: tables.length, target, tables: tables.length,
     table: tables.length === 1 ? `${tables[0].schemaName}.${tables[0].tableName}` : null,
     rowLimit: opts.rowLimit, maxScanBytes: opts.maxScanBytes,
   });
   opts.shouldAbort = () => task.cancelRequested;
-  tasks.run(task, (onProgress) => preflight.scan(req.sess.pool, tables, opts, onProgress), config.paths.snapshots);
+  tasks.run(task, (onProgress) => preflight.scan(req.sess.pool, tables, opts, onProgress), true);
   res.status(202).json(tasks.view(task));
 }));
 
 router.get('/preflight/:id', requireSession, (req, res) => {
-  const task = tasks.get(req.params.id);
+  const task = tasks.get(req.params.id, req.sess);
   if (task) return res.json(tasks.view(task, req.query.full === '1'));
-  const stored = log.readJson(config.paths.snapshots, req.params.id);
-  if (!stored) return res.status(404).json({ error: 'ไม่พบผลการสแกน' });
-  res.json({ id: stored.id, kind: stored.kind, status: 'done', createdAt: stored.createdAt, result: stored.result, summary: stored.result && stored.result.summary });
+  const hit = store.readJson(req.sess, 'snapshots', req.params.id);
+  if (!hit) return res.status(404).json({ error: foreignOr(req.sess, 'snapshots', req.params.id, 'ผลการสแกน') });
+  const stored = hit.data;
+  res.json({
+    id: stored.id, kind: stored.kind, status: 'done', createdAt: stored.createdAt,
+    connection: stored.connection || null, legacy: hit.legacy,
+    result: stored.result, summary: stored.result && stored.result.summary,
+  });
 });
 
 router.post('/preflight/:id/cancel', requireSession, (req, res) => {
-  res.json({ ok: tasks.cancel(req.params.id) });
+  res.json({ ok: tasks.cancel(req.params.id, req.sess) });
 });
 
 router.get('/preflight', requireSession, (req, res) => {
-  res.json({ tasks: tasks.list('preflight'), archived: log.listJson(config.paths.snapshots).filter((f) => f.startsWith('preflight-')) });
+  res.json({ tasks: tasks.list('preflight', req.sess), archived: archivedSnapshots(req.sess, 'preflight-') });
 });
 
 /* ---------------------------------------------------------------- checksum */
@@ -372,35 +416,45 @@ router.post('/checksum', requireSession, asyncHandler(async (req, res) => {
     statementTimeoutSec: config.scan.statementTimeoutSec,
     includeNative: !!req.body.includeNative,
   };
-  const task = tasks.create('checksum', req.sess.id, {
+  const task = tasks.create('checksum', req.sess, {
     total: tables.length, mode: opts.mode, deep: opts.deep, strategy: opts.strategy, target,
     table: tables.length === 1 ? `${tables[0].schemaName}.${tables[0].tableName}` : null,
   });
   opts.shouldAbort = () => task.cancelRequested;
-  tasks.run(task, (onProgress) => checksum.snapshot(req.sess.pool, tables, opts, onProgress), config.paths.snapshots);
+  tasks.run(task, (onProgress) => checksum.snapshot(req.sess.pool, tables, opts, onProgress), true);
   res.status(202).json(tasks.view(task));
 }));
 
 router.get('/checksum/:id', requireSession, (req, res) => {
-  const task = tasks.get(req.params.id);
+  const task = tasks.get(req.params.id, req.sess);
   if (task) return res.json(tasks.view(task, req.query.full === '1'));
-  const stored = log.readJson(config.paths.snapshots, req.params.id);
-  if (!stored) return res.status(404).json({ error: 'ไม่พบ snapshot' });
-  res.json({ id: stored.id, kind: stored.kind, status: 'done', createdAt: stored.createdAt, result: stored.result });
+  const hit = store.readJson(req.sess, 'snapshots', req.params.id);
+  if (!hit) return res.status(404).json({ error: foreignOr(req.sess, 'snapshots', req.params.id, 'snapshot') });
+  const stored = hit.data;
+  res.json({
+    id: stored.id, kind: stored.kind, status: 'done', createdAt: stored.createdAt,
+    connection: stored.connection || null, legacy: hit.legacy, result: stored.result,
+  });
 });
 
 router.post('/checksum/:id/cancel', requireSession, (req, res) => {
-  res.json({ ok: tasks.cancel(req.params.id) });
+  res.json({ ok: tasks.cancel(req.params.id, req.sess) });
 });
 
 router.get('/checksum', requireSession, (req, res) => {
-  res.json({ tasks: tasks.list('checksum'), archived: log.listJson(config.paths.snapshots).filter((f) => f.startsWith('checksum-')) });
+  res.json({ tasks: tasks.list('checksum', req.sess), archived: archivedSnapshots(req.sess, 'checksum-') });
 });
 
 /** Re-run a stored snapshot and diff it - the "did anything change?" button. */
 router.post('/checksum/:id/verify', requireSession, asyncHandler(async (req, res) => {
-  const stored = tasks.get(req.params.id)?.result || (log.readJson(config.paths.snapshots, req.params.id) || {}).result;
-  if (!stored) return res.status(404).json({ error: 'ไม่พบ snapshot ต้นทาง' });
+  // Comparing against a baseline from another endpoint is the single most
+  // expensive mistake this tool can let through: the digests disagree, the
+  // operator concludes the migration corrupted the data, and the rollback that
+  // follows is the real damage. store.readJson only looks under this endpoint,
+  // and foreignOr turns the miss into an explanation.
+  const stored = tasks.get(req.params.id, req.sess)?.result
+    || (store.readJson(req.sess, 'snapshots', req.params.id) || { data: {} }).data.result;
+  if (!stored) return res.status(404).json({ error: foreignOr(req.sess, 'snapshots', req.params.id, 'snapshot ต้นทาง') });
   const keys = Object.keys(stored.tables);
   const target = resolveTarget(req.body);
   const tables = await queries.tablesForPlan(req.sess.pool, { tables: keys, onlyNonCompliant: false, target });
@@ -413,7 +467,7 @@ router.post('/checksum/:id/verify', requireSession, asyncHandler(async (req, res
     rowLimit: stored.rowLimit || undefined,
     statementTimeoutSec: config.scan.statementTimeoutSec,
   };
-  const task = tasks.create('checksum', req.sess.id, { total: tables.length, mode: opts.mode, deep: opts.deep, comparedWith: req.params.id });
+  const task = tasks.create('checksum', req.sess, { total: tables.length, mode: opts.mode, deep: opts.deep, comparedWith: req.params.id });
   tasks.run(task, async (onProgress) => {
     const fresh = await checksum.snapshot(req.sess.pool, tables, opts, onProgress);
     const comparison = {};
@@ -427,7 +481,7 @@ router.post('/checksum/:id/verify', requireSession, asyncHandler(async (req, res
       mode: opts.mode, deep: opts.deep, baseline: req.params.id, tables: fresh.tables, comparison,
       summary: { tables: keys.length, mismatches, ok: mismatches === 0 },
     };
-  }, config.paths.snapshots);
+  }, true);
   res.status(202).json(tasks.view(task));
 }));
 
@@ -477,20 +531,24 @@ router.post('/plan', requireSession, asyncHandler(async (req, res) => {
 
   const id = `plan-${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}-${Math.random().toString(16).slice(2, 8)}`;
   const tableMeta = Object.fromEntries(tables.map((t) => [`${t.schemaName}.${t.tableName}`, t]));
-  log.writeJson(config.paths.plans, id, { id, createdAt: new Date().toISOString(), sessionId: req.sess.id, plan, tableMeta });
-  log.audit('plan.created', { planId: id, sessionId: req.sess.id, steps: plan.steps.length, options: plan.options });
+  store.writeJson(req.sess, 'plans', id, { id, createdAt: new Date().toISOString(), sessionId: req.sess.id, plan, tableMeta });
+  log.auditFor(req.sess, 'plan.created', { planId: id, sessionId: req.sess.id, steps: plan.steps.length, options: plan.options });
   res.json({ planId: id, plan });
 }));
 
 router.get('/plan/:id', requireSession, (req, res) => {
-  const stored = log.readJson(config.paths.plans, req.params.id);
-  if (!stored) return res.status(404).json({ error: 'ไม่พบแผน' });
-  res.json({ planId: stored.id, plan: stored.plan, createdAt: stored.createdAt });
+  const hit = store.readJson(req.sess, 'plans', req.params.id);
+  if (!hit) return res.status(404).json({ error: foreignOr(req.sess, 'plans', req.params.id, 'แผน') });
+  res.json({
+    planId: hit.data.id, plan: hit.data.plan, createdAt: hit.data.createdAt,
+    connection: hit.data.connection || null, legacy: hit.legacy,
+  });
 });
 
 router.get('/plan/:id/script', requireSession, (req, res) => {
-  const stored = log.readJson(config.paths.plans, req.params.id);
-  if (!stored) return res.status(404).json({ error: 'ไม่พบแผน' });
+  const hit = store.readJson(req.sess, 'plans', req.params.id);
+  if (!hit) return res.status(404).json({ error: foreignOr(req.sess, 'plans', req.params.id, 'แผน') });
+  const stored = hit.data;
   const direction = req.query.direction === 'rollback' ? 'rollback' : 'forward';
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
   if (req.query.download === '1') {
@@ -503,8 +561,14 @@ router.get('/plan/:id/script', requireSession, (req, res) => {
 
 router.post('/jobs', requireSession, asyncHandler(async (req, res) => {
   const body = req.body || {};
-  const stored = log.readJson(config.paths.plans, String(body.planId || ''));
-  if (!stored) return res.status(404).json({ error: 'ไม่พบแผน — กรุณาสร้างแผนใหม่' });
+  const planId = String(body.planId || '');
+  const planHit = store.readJson(req.sess, 'plans', planId);
+  if (!planHit) {
+    return res.status(404).json({
+      error: store.foreignError(req.sess, 'plans', planId, 'แผน') || 'ไม่พบแผน — กรุณาสร้างแผนใหม่',
+    });
+  }
+  const stored = planHit.data;
   const planTables = new Set(stored.plan.steps.filter((st) => st.tableName)
     .map((st) => `${st.schemaName}.${st.tableName}`));
   if (config.workflow.oneTableAtATime && planTables.size > 1) {
@@ -521,8 +585,10 @@ router.post('/jobs', requireSession, asyncHandler(async (req, res) => {
   // Preflight gate: refuse to run a lossy conversion unless explicitly forced.
   let preflightResult = null;
   if (body.preflightId) {
-    const t = tasks.get(body.preflightId);
-    preflightResult = t ? t.result : (log.readJson(config.paths.snapshots, body.preflightId) || {}).result;
+    const t = tasks.get(body.preflightId, req.sess);
+    preflightResult = t
+      ? t.result
+      : (store.readJson(req.sess, 'snapshots', body.preflightId) || { data: {} }).data.result;
   }
   if (!body.dryRun) {
     if (!preflightResult && body.acknowledgeNoPreflight !== true) {
@@ -558,7 +624,7 @@ router.post('/jobs', requireSession, asyncHandler(async (req, res) => {
         });
       }
       if (uncovered.length) {
-        log.audit('job.preflight.scope_override', {
+        log.auditFor(req.sess, 'job.preflight.scope_override', {
           sessionId: req.sess.id, planId: stored.id, preflightId: body.preflightId, uncoveredCount: uncovered.length,
         });
       }
@@ -602,43 +668,50 @@ router.post('/jobs', requireSession, asyncHandler(async (req, res) => {
 }));
 
 router.get('/jobs', requireSession, (req, res) => {
-  res.json({ jobs: jobs.list(), archived: jobs.listArchived() });
+  res.json({ jobs: jobs.list(req.sess), archived: jobs.listArchived(req.sess) });
 });
 
 router.get('/jobs/:id', requireSession, (req, res) => {
-  const job = jobs.get(req.params.id);
+  const job = jobs.get(req.params.id, req.sess);
   if (job) return res.json(jobs.snapshot(job, { includeSteps: req.query.steps !== '0' }));
-  const archived = jobs.readArchived(req.params.id);
-  if (!archived) return res.status(404).json({ error: 'ไม่พบ job' });
+  const archived = jobs.readArchived(req.sess, req.params.id);
+  if (!archived) return res.status(404).json({ error: foreignOr(req.sess, 'jobs', req.params.id, 'job') });
   res.json({ ...archived, archived: true });
 });
 
 router.get('/jobs/:id/log', requireSession, (req, res) => {
-  res.json({ entries: log.readJobLog(req.params.id, Number(req.query.limit) || 3000) });
+  // A running job knows its own endpoint; an archived one is looked up under
+  // the session's, which is also what keeps another host's stream out of view.
+  const job = jobs.get(req.params.id, req.sess) || { id: req.params.id, connection: store.stamp(req.sess) };
+  res.json({ entries: log.readJobLog(job, Number(req.query.limit) || 3000) });
 });
 
 router.post('/jobs/:id/cancel', requireSession, (req, res) => {
-  res.json({ ok: jobs.cancel(req.params.id) });
+  res.json({ ok: jobs.cancel(req.params.id, req.sess) });
 });
 
 router.post('/jobs/:id/pause', requireSession, (req, res) => {
-  res.json({ ok: jobs.pause(req.params.id, req.body && req.body.paused !== false) });
+  res.json({ ok: jobs.pause(req.params.id, req.body && req.body.paused !== false, req.sess) });
 });
 
 router.post('/jobs/:id/rollback', requireSession, asyncHandler(async (req, res) => {
-  const out = await jobs.rollbackJob(req.params.id, { stepIds: req.body && req.body.stepIds });
+  const out = await jobs.rollbackJob(req.params.id, { stepIds: req.body && req.body.stepIds, conn: req.sess });
   res.json(out);
 }));
 
 /* ------------------------------------------------------------------- audit */
 
 router.get('/audit', requireSession, (req, res) => {
-  res.json({ days: log.listAuditDays() });
+  res.json({
+    days: log.listAuditDays(req.sess),
+    endpoint: store.label(req.sess),
+    hosts: store.listHosts().map((h) => ({ host: h.host, port: h.port })),
+  });
 });
 
 router.get('/audit/:day', requireSession, (req, res) => {
   try {
-    res.json({ entries: log.readAudit(req.params.day, Number(req.query.limit) || 1500) });
+    res.json({ entries: log.readAudit(req.sess, req.params.day, Number(req.query.limit) || 1500) });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
@@ -647,7 +720,9 @@ router.get('/audit/:day', requireSession, (req, res) => {
 /* --------------------------------------------------------- error handling */
 
 router.use((err, req, res, next) => {
-  log.audit('api.error', { path: req.path, error: err });
+  // Routed to the endpoint when the request had one - an error while talking to
+  // prod belongs in prod's trail, not in a pile shared with every other host.
+  log.auditFor(req.sess, 'api.error', { path: req.path, error: err });
   const status = err.status || (err.code && String(err.code).startsWith('ER_') ? 400 : 500);
   res.status(status).json({ error: err.message, code: err.code, sqlState: err.sqlState });
 });

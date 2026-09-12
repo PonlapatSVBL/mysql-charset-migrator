@@ -5,6 +5,7 @@
 // The database password is posted once and never stored client-side.
 
 import { toast } from './util.js';
+import { useEndpoint } from './store.js';
 
 const KEY_STORAGE = 'csmig.bootKey';
 const SESSION_STORAGE = 'csmig.sessionId';
@@ -30,6 +31,8 @@ export const state = {
 export function setSession(view) {
   state.session = view;
   state.sessionId = view ? view.sessionId : '';
+  // The one place the workspace learns which server its saved ids belong to.
+  useEndpoint(view);
   if (view) {
     sessionStorage.setItem(SESSION_STORAGE, view.sessionId);
     if (view.target) state.target = view.target;

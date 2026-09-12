@@ -463,15 +463,20 @@ label.check input { width: auto; accent-color: var(--accent); }
 
 /* The column tick list in the plan step. A wide table has dozens of text
    columns, so it wraps into as many lanes as fit and scrolls past ~8 rows
-   rather than pushing the build button off the screen. */
+   rather than pushing the build button off the screen. Each row also carries
+   its key/FK wiring and a verdict on whether narrowing it can lose a
+   character, so a lane needs more room than the name alone would want. */
 .collist {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
   gap: 2px var(--s3);
   max-height: 232px; overflow-y: auto;
   border: 1px solid var(--line-soft); border-radius: var(--r-md);
   padding: var(--s2) var(--s3);
 }
 .collist label.check { padding: 2px 0; }
+.collist label.check > .mono:first-of-type { flex: 0 0 auto; }
+.collist label.check .trunc { flex: 1 1 0; min-width: 0; }
+.collist label.check .chip { flex: 0 0 auto; }
 .collist .mono { font-size: var(--t-mini); }
 .hint { color: var(--fg-mute); font-size: var(--t-small); }
 .hint.mono { font-size: var(--t-mini); }

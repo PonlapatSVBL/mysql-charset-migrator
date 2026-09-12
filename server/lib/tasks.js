@@ -3,6 +3,7 @@
  *  (preflight, checksum snapshot). Results are persisted; progress is polled. */
 const crypto = require('crypto');
 const log = require('./logger');
+const store = require('./store');
 
 const tasks = new Map();
 
@@ -11,10 +12,15 @@ function newId(kind) {
   return `${kind}-${t}-${crypto.randomBytes(3).toString('hex')}`;
 }
 
-function create(kind, sessionId, meta = {}) {
+/**
+ * `sess` is the session the scan runs against. The task keeps its endpoint,
+ * not just the session id, because the result outlives the session: it is
+ * filed under that endpoint and must never be read back against another one.
+ */
+function create(kind, sess, meta = {}) {
   const id = newId(kind);
   const task = {
-    id, kind, sessionId, meta,
+    id, kind, sessionId: sess.id, connection: store.stamp(sess), meta,
     status: 'running',
     createdAt: new Date().toISOString(),
     finishedAt: null,
@@ -24,11 +30,12 @@ function create(kind, sessionId, meta = {}) {
     cancelRequested: false,
   };
   tasks.set(id, task);
-  log.audit(`${kind}.start`, { taskId: id, sessionId, meta });
+  log.auditFor(sess, `${kind}.start`, { taskId: id, sessionId: sess.id, meta });
   return task;
 }
 
-function run(task, fn, persistDir) {
+/** `persist` files the result under the task's own endpoint. */
+function run(task, fn, persist = false) {
   task.promise = (async () => {
     try {
       task.result = await fn((done, total, current) => {
@@ -38,12 +45,16 @@ function run(task, fn, persistDir) {
         };
       });
       task.status = task.result && task.result.cancelled ? 'cancelled' : 'done';
-      if (persistDir) log.writeJson(persistDir, task.id, { id: task.id, kind: task.kind, createdAt: task.createdAt, meta: task.meta, result: task.result });
-      log.audit(`${task.kind}.done`, { taskId: task.id, summary: task.result && task.result.summary });
+      if (persist) {
+        store.writeJson(task.connection, 'snapshots', task.id, {
+          id: task.id, kind: task.kind, createdAt: task.createdAt, meta: task.meta, result: task.result,
+        });
+      }
+      log.auditFor(task.connection, `${task.kind}.done`, { taskId: task.id, summary: task.result && task.result.summary });
     } catch (err) {
       task.status = 'failed';
       task.error = err.message;
-      log.audit(`${task.kind}.failed`, { taskId: task.id, error: err.message });
+      log.auditFor(task.connection, `${task.kind}.failed`, { taskId: task.id, error: err.message });
     } finally {
       task.finishedAt = new Date().toISOString();
     }
@@ -51,15 +62,29 @@ function run(task, fn, persistDir) {
   return task;
 }
 
-const get = (id) => tasks.get(id) || null;
+/**
+ * A task, but only when it belongs to `conn`.
+ *
+ * The registry is per-process, not per-endpoint. Without this check an id from
+ * the uat window resolves out of memory in the prod window and never reaches
+ * the on-disk scoping at all - which is the exact mix-up filing artifacts per
+ * host exists to prevent. `conn` is omitted only by callers that already hold
+ * the task and are not answering a request.
+ */
+function get(id, conn) {
+  const task = tasks.get(id) || null;
+  if (!task) return null;
+  if (conn && !store.sameEndpoint(task.connection, conn)) return null;
+  return task;
+}
 
 /** Cooperative cancel: the scan loops check `cancelRequested` between tables,
  *  and the statement timeout bounds the table they are already inside. */
-function cancel(id) {
-  const task = tasks.get(id);
+function cancel(id, conn) {
+  const task = get(id, conn);
   if (!task || task.status !== 'running') return false;
   task.cancelRequested = true;
-  log.audit(`${task.kind}.cancel`, { taskId: id });
+  log.auditFor(task.connection, `${task.kind}.cancel`, { taskId: id });
   return true;
 }
 
@@ -74,8 +99,9 @@ function view(task, includeResult = false) {
   return base;
 }
 
-const list = (kind) => [...tasks.values()]
-  .filter((t) => !kind || t.kind === kind)
+/** Running and finished tasks for one endpoint. Same reason as get(). */
+const list = (kind, conn) => [...tasks.values()]
+  .filter((t) => (!kind || t.kind === kind) && (!conn || store.sameEndpoint(t.connection, conn)))
   .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
   .map((t) => view(t));
 

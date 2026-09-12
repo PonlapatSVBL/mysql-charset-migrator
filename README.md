@@ -148,17 +148,49 @@ Pragma: no-cache
 4. `Buffer` → `«buffer:N»` (ไม่เคย dump เนื้อ), `Error` → เก็บแค่ `name/message/code/errno/sqlState`, จำกัดความลึก object ที่ 8 ชั้น
 5. ไฟล์ทั้งหมดเขียนด้วย `mode: 0o600`
 
-โครงสร้างไฟล์ใต้ `data/` (อยู่ใน `.gitignore`):
+โครงสร้างไฟล์ใต้ `data/` (อยู่ใน `.gitignore`) — **แยกตามเครื่องปลายทาง**:
 
 ```text
 data/
-├── audit/audit-YYYY-MM-DD.ndjson    audit trail รวมทุกเหตุการณ์ 1 ไฟล์ต่อวัน
-├── jobs/<jobId>.json                 manifest ของ job (แผน + สถานะ + checksum + backup + rollback)
-├── jobs/<jobId>.ndjson               event stream ของ job นั้น (เขียนคู่ขนานไปที่ audit ด้วย)
-├── jobs/<jobId>-backup/<db>.<tbl>.sql  ไฟล์ผลลัพธ์ mysqldump (เฉพาะ backupStrategy = mysqldump)
-├── snapshots/<taskId>.json           ผล preflight scan และ checksum snapshot
-└── plans/<planId>.json               แผนที่สร้างไว้ + tableMeta ที่ใช้สร้างแผน
+├── audit/audit-YYYY-MM-DD.ndjson     เหตุการณ์ระดับโปรเซส ที่ไม่ได้เป็นของเครื่องไหน
+│                                     (server.start/stop, crash) 1 ไฟล์ต่อวัน
+├── hosts/<host>_<port>/              ทุกอย่างที่เป็นหลักฐานของเครื่องนั้น
+│   ├── audit/audit-YYYY-MM-DD.ndjson   audit trail ของเครื่องนี้ 1 ไฟล์ต่อวัน
+│   ├── jobs/<jobId>.json               manifest ของ job (แผน + สถานะ + checksum + backup + rollback)
+│   ├── jobs/<jobId>.ndjson             event stream ของ job นั้น (เขียนคู่ขนานไปที่ audit ของเครื่องนี้)
+│   ├── jobs/<jobId>-backup/<db>.<tbl>.sql  ไฟล์ผลลัพธ์ mysqldump (เฉพาะ backupStrategy = mysqldump)
+│   ├── snapshots/<taskId>.json         ผล preflight scan และ checksum snapshot
+│   └── plans/<planId>.json             แผนที่สร้างไว้ + tableMeta ที่ใช้สร้างแผน
+└── jobs/ snapshots/ plans/           ของเก่าก่อนแยกเครื่อง — อ่านได้ ไม่เขียนเพิ่ม
 ```
+
+**ทำไมต้องแยก** — ทุกไฟล์ที่แอปนี้เขียนเป็นคำให้การเกี่ยวกับฐานข้อมูล **หนึ่งเครื่อง** พอกองรวมกัน
+รันของ uat กับ prod แยกกันไม่ออกถ้าไม่เปิดไฟล์อ่านทีละอัน และที่แย่กว่านั้นคือไม่มีอะไรกัน
+checksum baseline ที่เก็บจาก uat ไม่ให้ถูกเอาไปเทียบกับผลที่รันบน prod — digest จะไม่ตรงกัน
+โดยไม่มีใครอธิบายได้ว่าทำไม แล้วการ rollback ที่ตามมาต่างหากที่เป็นความเสียหายจริง
+
+ผลที่ตามมาสามข้อ:
+
+1. **อ่านข้ามเครื่องไม่ได้** — `GET /api/plan/:id`, `/api/preflight/:id`, `/api/checksum/:id`,
+   `/api/jobs/:id` และ `POST /api/checksum/:id/verify` ค้นเฉพาะใต้เครื่องที่ session นี้ต่ออยู่
+   ถ้า id นั้นมีจริงแต่เป็นของอีกเครื่อง จะได้ error ที่บอกชื่อทั้งสองเครื่อง ไม่ใช่ 404 เปล่าๆ
+
+   การแยกบนดิสก์อย่างเดียวไม่พอ เพราะ **registry ในหน่วยความจำเป็นของโปรเซส ไม่ใช่ของเครื่อง**
+   งานที่รันบน uat ยังอยู่ใน `jobs` Map และ `tasks` Map หลังจาก operator กลับมาต่อ prod แล้ว
+   `jobs.get/list/cancel/pause/rollbackJob` และ `tasks.get/list/cancel` จึงรับ endpoint เข้าไปด้วย
+   และคืน null ถ้า job/task นั้นเป็นของเครื่องอื่น — ถ้าไม่มีตรงนี้ id จาก uat จะถูกตอบจากหน่วยความจำ
+   โดยไม่ผ่านการตรวจบนดิสก์เลย ฝั่งเบราว์เซอร์ก็เช่นกัน: ความคืบหน้าราย table ใน `sessionStorage`
+   ถูกแยกเป็นถังต่อ endpoint (`public/js/store.js` → `useEndpoint()` เรียกจาก `setSession()`)
+   เพราะ `schema.table` ชื่อซ้ำกันได้ระหว่างสองเครื่อง — นั่นคือนิยามของ uat copy
+2. **ทุก record บอกที่มาของตัวเอง** — ทุกไฟล์มี `connection: {host, port, user}` และทุกบรรทัด
+   audit ที่เป็นของเครื่องใดเครื่องหนึ่งมี `host` / `port` อยู่ในบรรทัด ไฟล์ที่ถูกก๊อปออกไปที่อื่น
+   ยังบอกได้ว่ามาจากไหน
+3. **ของเก่าไม่ถูกย้าย** — plan/snapshot ที่เขียนก่อนการแยกไม่ได้บันทึกไว้ว่ามาจากเครื่องไหน
+   การเดาให้แย่กว่าการยอมรับว่าไม่รู้ ไฟล์พวกนี้จึงอยู่ที่เดิม อ่านได้จากทุกเครื่อง และถูกตอบกลับ
+   พร้อม flag `legacy: true`
+
+ชื่อโฟลเดอร์เป็น `<host>_<port>` โดย host ถูกแปลงเป็นตัวพิมพ์เล็กและตัวอักษรที่ใช้ในชื่อไฟล์ไม่ได้
+ถูกแทนด้วย `-` (DNS ไม่สนตัวพิมพ์ แต่ filesystem ของ Linux สน — เครื่องเดียวกันต้องไม่กลายเป็นสองกอง)
 
 ### สิ่งที่แอปนี้ **ไม่** ป้องกัน — ขอบเขตที่อยู่นอก threat model
 
@@ -417,7 +449,7 @@ PK ที่เป็น text จะถูก **จัดลำดับให�
 
 #### 4.3 / 4.4 แผน & รัน
 
-`POST /api/plan` สร้าง **plan เป็น data ล้วน ไม่แตะฐานข้อมูลเลย** เก็บลง `data/plans/<planId>.json`
+`POST /api/plan` สร้าง **plan เป็น data ล้วน ไม่แตะฐานข้อมูลเลย** เก็บลง `data/hosts/<host>_<port>/plans/<planId>.json`
 
 **Plan step kinds ทั้ง 4 แบบ**
 
@@ -536,7 +568,7 @@ SET SESSION max_execution_time = <ms>;   -- ถ้า CSMIG_STMT_TIMEOUT > 0
 |---|---|---|---|
 | `none` | ไม่ backup | ใช้ inverse DDL เท่านั้น | เร็วสุด แต่ **กู้อักขระที่กลายเป็น `?` ไม่ได้เลย** |
 | `table_copy` | `CREATE TABLE \`db\`.\`_csmig_<stamp>_<tbl>\` LIKE \`db\`.\`tbl\`` แล้ว `INSERT INTO ... SELECT * FROM ...` แล้วนับแถวยืนยัน | **`RENAME TABLE` สลับกลับแบบ atomic** (เร็วและครบที่สุด) | ใช้เนื้อที่ใน DB เท่าตารางเดิม; ชื่อ backup ถูกตัดที่ 64 อักขระ |
-| `mysqldump` | `spawn('mysqldump', ...)` เขียนไป `data/jobs/<jobId>-backup/<db>.<tbl>.sql` | ใช้ inverse DDL แล้วแนบ note ชี้ path ไฟล์ให้ restore ด้วยมือ | ส่งรหัสผ่านผ่าน env `MYSQL_PWD` (ไม่โผล่ใน `ps`); ต้องมี `mysqldump` ใน `PATH` |
+| `mysqldump` | `spawn('mysqldump', ...)` เขียนไป `data/hosts/<host>_<port>/jobs/<jobId>-backup/<db>.<tbl>.sql` | ใช้ inverse DDL แล้วแนบ note ชี้ path ไฟล์ให้ restore ด้วยมือ | ส่งรหัสผ่านผ่าน env `MYSQL_PWD` (ไม่โผล่ใน `ps`); ต้องมี `mysqldump` ใน `PATH` |
 
 **วิธีคัดลอกของ `table_copy`** (`server/lib/jobs.js` → `copyTable()`) ออกแบบมาให้ตารางใหญ่ไม่ล้มทั้งเซิร์ฟเวอร์
 
@@ -566,12 +598,13 @@ flag ของ mysqldump ที่ใช้: `--single-transaction --quick --hex
 
 **pause / resume / cancel** — `POST /api/jobs/:id/pause {paused}` (job หยุดที่ขอบ step ไม่ตัดกลาง `ALTER`), `POST /api/jobs/:id/cancel` (ตั้ง `cancelRequested` ซึ่งถูกเช็คก่อนแต่ละ step และในลูป throttle)
 
-**Persistence** — `data/jobs/<id>.json` ถูกเขียนใหม่ทุกครั้งที่สถานะเปลี่ยน (สร้าง job / step เปลี่ยนสถานะ / backup เสร็จ / rollback) จึงมี manifest ที่ใช้ rollback ได้แม้โปรเซสจะ crash กลางทาง คู่กับ event stream `data/jobs/<id>.ndjson`
+**Persistence** — `data/hosts/<host>_<port>/jobs/<id>.json` ถูกเขียนใหม่ทุกครั้งที่สถานะเปลี่ยน (สร้าง job / step เปลี่ยนสถานะ / backup เสร็จ / rollback) จึงมี manifest ที่ใช้ rollback ได้แม้โปรเซสจะ crash กลางทาง คู่กับ event stream `<id>.ndjson` ที่อยู่ข้างกัน
 **Job object อยู่ในหน่วยความจำเท่านั้น** — restart แล้ว job จะไม่ถูกโหลดกลับมาเป็น object ที่รันหรือ rollback ได้ `jobs.listArchived()` อ่าน JSON เก่ามาแสดงแบบ **read-only** (`archived: true`)
 
 ### 7. Logs / Audit (`#logs`)
 
-- `GET /api/audit` คืนรายชื่อไฟล์รายวัน, `GET /api/audit/:day` อ่านได้สูงสุด 1,500 บรรทัดล่าสุด (default) — path ถูกตรวจว่าอยู่ใต้ `data/audit` เท่านั้น กัน path traversal
+- `GET /api/audit` คืนรายชื่อไฟล์รายวันของเครื่องที่ต่ออยู่ + ชื่อ endpoint, `GET /api/audit/:day` อ่านได้สูงสุด 1,500 บรรทัดล่าสุด (default) โดย **รวม** trail ของเครื่องนั้นเข้ากับ trail ระดับโปรเซส แล้วเรียงตามเวลา — ชื่อวันถูกตรวจด้วย pattern `audit-YYYY-MM-DD.ndjson` แบบทั้งสตริง กัน path traversal
+- จากไฟล์ระดับโปรเซส จะเอามาเฉพาะบรรทัดที่ **ไม่ผูกกับ session ใด** (ไม่มี `sessionId`/`jobId`/`taskId`/`planId`) และไม่ระบุ `host` หรือระบุตรงกับเครื่องที่ต่ออยู่ — เพราะบรรทัดที่เขียนไว้ก่อนแยกเครื่องยังนอนอยู่ในไฟล์นั้น การรวมมาทั้งดุ้นคือสาเหตุที่ทำให้ log ของ uat โผล่ในหน้าต่างของ prod ด้วยเหตุผลเดียวกัน `server.start` รายงาน `bind` แทน `host` เพราะ `host` ในบรรทัด audit ต้องแปลว่าฐานข้อมูลเท่านั้น
 - `GET /api/jobs/:id/log` อ่าน NDJSON ของ job (สูงสุด 3,000 บรรทัดล่าสุด default)
 - ทุกบรรทัดผ่าน redaction เดียวกันตอนเขียน — log ที่แสดงจึงไม่มีรหัสผ่านอยู่แล้วโดยโครงสร้าง
 
@@ -600,7 +633,7 @@ flag ของ mysqldump ที่ใช้: `--single-transaction --quick --hex
 | `GET` | `/api/export/tables.xlsx` | work list เป็นไฟล์ Excel ใช้ฟิลเตอร์เดียวกัน ไม่แบ่งหน้า ตั้งต้น `status=todo` (cap 100k แถว เกินแล้วตอบ 413) |
 | `GET` | `/api/tables/:schema/:table` | ทุกอย่างที่หน้าทำงานต่อตารางต้องใช้: metadata, คอลัมน์ที่ต้องเปลี่ยน, `scanPlan`, `checksumPlan` |
 | `POST` | `/api/preflight` | เริ่ม preflight scan (async) → **HTTP 202** + task view |
-| `GET` | `/api/preflight` | รายการ task ที่รันอยู่ + ผลที่เก็บไว้ใน `data/snapshots` |
+| `GET` | `/api/preflight` | รายการ task ที่รันอยู่ + ผลที่เก็บไว้ของเครื่องนี้ |
 | `GET` | `/api/preflight/:id` | สถานะ/ความคืบหน้า (ใส่ `?full=1` เพื่อเอาผลเต็ม) — ถ้าไม่อยู่ในหน่วยความจำจะอ่านจากไฟล์ |
 | `POST` | `/api/preflight/:id/cancel` | ขอยกเลิกการสแกน (เช็คระหว่างตาราง + statement timeout คุมตารางที่กำลังอ่าน) |
 | `POST` | `/api/checksum` | เริ่มทำ checksum snapshot (async) → **HTTP 202** |
@@ -608,7 +641,7 @@ flag ของ mysqldump ที่ใช้: `--single-transaction --quick --hex
 | `GET` | `/api/checksum/:id` | สถานะ/ผลของ snapshot (`?full=1`) |
 | `POST` | `/api/checksum/:id/cancel` | ขอยกเลิกการคำนวณ |
 | `POST` | `/api/checksum/:id/verify` | รัน snapshot ใหม่บนตารางชุดเดิมแล้ว diff กับ baseline → **HTTP 202** |
-| `POST` | `/api/plan` | สร้างแผน (ไม่แตะ DB) → `{planId, plan}` และบันทึกลง `data/plans` |
+| `POST` | `/api/plan` | สร้างแผน (ไม่แตะ DB) → `{planId, plan}` และบันทึกลงกองของเครื่องนี้ |
 | `GET` | `/api/plan/:id` | อ่านแผนที่บันทึกไว้ |
 | `GET` | `/api/plan/:id/script` | แผนในรูปสคริปต์ `.sql` (`?direction=forward\|rollback`, `?download=1`) |
 | `POST` | `/api/jobs` | สร้างและเริ่ม job จาก `planId` → **HTTP 202** — **มี preflight gate ตรงนี้** |
@@ -696,7 +729,7 @@ curl -s http://127.0.0.1:7343/api/jobs \
 
 10. **ไม่มี endpoint สำหรับลบ backup table `_csmig_*`** — ต้องทำด้วย SQL เอง (ดูขั้นตอน cleanup ใน `RUNBOOK.md`) แอปไม่ลบให้อัตโนมัติโดยเจตนา เพื่อไม่ให้ทำลายทางกู้ข้อมูลไปเอง
 
-10. **job ที่รันอยู่จะหายเมื่อ restart** — `jobs` เป็น `Map` ในหน่วยความจำ manifest บนดิสก์ยังอยู่ครบ แต่โหลดกลับมาเป็น job ที่ pause/cancel/rollback ผ่าน API ไม่ได้ ต้อง rollback ด้วยมือจาก `rollbackSql` ใน `data/jobs/<id>.json` หรือจาก rollback script
+10. **job ที่รันอยู่จะหายเมื่อ restart** — `jobs` เป็น `Map` ในหน่วยความจำ manifest บนดิสก์ยังอยู่ครบ แต่โหลดกลับมาเป็น job ที่ pause/cancel/rollback ผ่าน API ไม่ได้ ต้อง rollback ด้วยมือจาก `rollbackSql` ใน `data/hosts/<host>_<port>/jobs/<id>.json` หรือจาก rollback script
 
 11. **`CSMIG_STMT_TIMEOUT` ไม่ได้จำกัดเวลาของ `ALTER`** — มันสร้าง `SET SESSION max_execution_time` ซึ่ง MySQL บังคับใช้กับ **`SELECT` ระดับ top-level เท่านั้น** ไม่ใช้กับ DDL ค่านี้จึงจำกัดได้แค่ query ของ checksum/preflight ไม่ใช่ตัว `ALTER` เอง
 
@@ -731,6 +764,7 @@ mysql-charset-migrator/
 │   └── lib/
 │       ├── ident.js           quote/validate identifier (backtick escaping), whitelist ชื่อ charset, escape string literal
 │       ├── logger.js          NDJSON audit log แบบ append-only + redact() + secret registry + อ่าน/เขียน JSON ใต้ data/
+│       ├── store.js           ที่อยู่ของหลักฐานแต่ละเครื่อง — data/hosts/<host>_<port>/ + อ่านของเก่าแบบ legacy
 │       ├── limits.js          scan governor: บังคับเพดานแถว/ขนาด, statement timeout (ตั้งและล้าง), ตรวจว่าสแกนครบไหม
 │       ├── queries.js         ทุก read ต่อ information_schema (schemas, inventory, summary, facets, tablesForPlan, tableList)
 │       ├── sqlgen.js          สร้าง plan/DDL/inverse DDL, tableRisks, BYTES_PER_CHAR, indexByteLimit, renderScript, pt-osc/gh-ost
@@ -758,10 +792,9 @@ mysql-charset-migrator/
 │           └── logs.js        ดู audit trail รายวัน + event log ของ job
 │
 └── data/                      สร้างอัตโนมัติตอนสตาร์ท (mode 0600) · อยู่ใน .gitignore
-    ├── audit/                 audit-YYYY-MM-DD.ndjson
-    ├── jobs/                  <jobId>.json, <jobId>.ndjson, <jobId>-backup/
-    ├── snapshots/             ผล preflight และ checksum snapshot
-    └── plans/                 แผนที่สร้างไว้ + tableMeta
+    ├── audit/                 เหตุการณ์ระดับโปรเซส audit-YYYY-MM-DD.ndjson
+    ├── hosts/<host>_<port>/   หลักฐานของแต่ละเครื่อง: audit/ jobs/ snapshots/ plans/
+    └── jobs/ snapshots/ plans/  ของเก่าก่อนแยกเครื่อง อ่านอย่างเดียว
 ```
 
 ---
@@ -801,7 +834,7 @@ env var ทั้งหมดที่ `config.js` และ `security.js` อ�
 | `runner.lockWaitTimeoutSec` | `30` | ใช้ตั้ง `lock_wait_timeout` + `innodb_lock_wait_timeout` ต่อ session ที่รัน job |
 | `runner.throttleWaitMs` | `2000` | เวลารอต่อรอบเมื่อเซิร์ฟเวอร์โหลดสูง |
 | `runner.throttleMaxWaits` | `150` | จำนวนรอบสูงสุด (150 × 2 วินาที ≈ 5 นาที) เกินกว่านี้ step ล้มเหลว |
-| `paths.*` | `data/`, `data/audit/`, `data/jobs/`, `data/snapshots/`, `data/plans/` | สร้างอัตโนมัติตอน `require` logger |
+| `paths.*` | `data/`, `data/hosts/`, `data/audit/` + `data/{jobs,snapshots,plans}/` (ของเก่า) | สร้างอัตโนมัติตอน `require` logger · โฟลเดอร์ต่อเครื่องสร้างเมื่อเขียนครั้งแรก |
 
 ค่า `runner` ยัง override ได้ต่อ job ด้วย field `runner` ใน body ของ `POST /api/jobs` (merge ทับ `config.runner`)
 

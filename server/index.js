@@ -5,6 +5,9 @@ const config = require('../config');
 const security = require('./security');
 const session = require('./session');
 const log = require('./lib/logger');
+// Required for its side effect as much as its exports: loading the store is
+// what teaches the logger where each endpoint's files go.
+require('./lib/store');
 const { router: api } = require('./routes/api');
 
 const app = express();
@@ -42,12 +45,14 @@ const server = app.listen(config.port, config.host, () => {
     `  ${url}`,
     '',
     `  bind: ${config.host}:${config.port} (loopback เท่านั้น)`,
-    `  logs: ${config.paths.data}`,
+    `  logs: ${config.paths.data} (แยกตามเครื่องปลายทางใต้ hosts/)`,
     '  รหัสฐานข้อมูลถูกเก็บในหน่วยความจำแบบเข้ารหัสเท่านั้น ไม่เขียนลงดิสก์ ไม่ส่งออกนอกเครื่อง',
     line,
     '',
   ].join('\n'));
-  log.audit('server.start', { host: config.host, port: config.port, target: config.target, pid: process.pid });
+  // `bind`, not `host`: this is the loopback address the console listens on,
+  // and a line in the audit trail that says `host` must mean the database.
+  log.audit('server.start', { bind: `${config.host}:${config.port}`, target: config.target, pid: process.pid });
   if (config.host !== '127.0.0.1' && config.host !== 'localhost' && config.host !== '::1') {
     process.stderr.write('\n  ⚠  คำเตือน: bind ไปยัง interface ที่ไม่ใช่ loopback — เครื่องอื่นในเครือข่ายอาจเข้าถึงแอปนี้ได้\n\n');
   }

@@ -13,6 +13,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const config = require('../../config');
 const log = require('./logger');
+const store = require('./store');
 const queries = require('./queries');
 const checksum = require('./checksum');
 const sqlgen = require('./sqlgen');
@@ -37,11 +38,7 @@ function backupTableName(tableName, stamp) {
 
 function persist(job) {
   const snap = snapshot(job, { includeSteps: true });
-  log.writeJson(config.paths.jobs, job.id, {
-    ...snap,
-    plan: job.plan,
-    connection: { host: job.connection.host, port: job.connection.port, user: job.connection.user },
-  });
+  store.writeJson(job.connection, 'jobs', job.id, { ...snap, plan: job.plan });
 }
 
 /** Wait until the server is quiet enough to start a rebuild. */
@@ -70,7 +67,7 @@ async function waitForQuiet(conn, job, stepId) {
       && (lagSec === null || lagSec <= runner.maxReplicaLagSec);
     if (quiet) return { ok: true, threadsRunning, lagSec, waitedMs: attempt * runner.throttleWaitMs };
     job.throttle = { since: job.throttle?.since || Date.now(), threadsRunning, lagSec };
-    log.jobLog(job.id, 'throttle.wait', { stepId, threadsRunning, lagSec, attempt });
+    log.jobLog(job, 'throttle.wait', { stepId, threadsRunning, lagSec, attempt });
     await sleep(runner.throttleWaitMs);
   }
   return { ok: false, timedOut: true };
@@ -87,7 +84,7 @@ async function waitWhilePaused(job) {
 /** mysqldump-based backup. The password is passed via MYSQL_PWD so it never
  *  appears in the process command line. */
 async function dumpTable(job, step) {
-  const dir = path.join(config.paths.jobs, `${job.id}-backup`);
+  const dir = path.join(store.dir(job.connection, 'jobs'), `${job.id}-backup`);
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, `${step.schemaName}.${step.tableName}.sql`);
   const sess = session.get(job.sessionId);
@@ -227,7 +224,7 @@ async function copyTable(conn, job, step) {
     const deferred = deferrableIndexes(indexRows);
     if (deferred.length) {
       await conn.query(`ALTER TABLE ${dst} ${deferred.map((ix) => `DROP INDEX ${q(ix.name)}`).join(', ')}`);
-      log.jobLog(job.id, 'step.backup.indexes.deferred', {
+      log.jobLog(job, 'step.backup.indexes.deferred', {
         stepId: step.id, indexes: deferred.map((ix) => ix.name),
       });
     }
@@ -243,7 +240,7 @@ async function copyTable(conn, job, step) {
       // No usable primary key: one statement is the only option. It is a
       // single transaction over the whole table, it cannot report progress,
       // and it cannot be cancelled - which is worth saying out loud.
-      log.jobLog(job.id, 'step.backup.unchunked', { stepId: step.id, reason: 'ไม่มี primary key ที่เดินตามลำดับได้' });
+      log.jobLog(job, 'step.backup.unchunked', { stepId: step.id, reason: 'ไม่มี primary key ที่เดินตามลำดับได้' });
       const [res] = await conn.query(`INSERT INTO ${dst}${intoCols} SELECT ${selectCols} FROM ${src}`);
       rows = Number(res.affectedRows) || 0;
       chunks = 1;
@@ -355,9 +352,9 @@ async function copyTable(conn, job, step) {
     // at all: someone could RENAME it in believing it is complete.
     try {
       await conn.query(`DROP TABLE IF EXISTS ${dst}`);
-      log.jobLog(job.id, 'step.backup.cleanup', { stepId: step.id, dropped: `${step.schemaName}.${bak}` });
+      log.jobLog(job, 'step.backup.cleanup', { stepId: step.id, dropped: `${step.schemaName}.${bak}` });
     } catch (dropErr) {
-      log.jobLog(job.id, 'step.backup.cleanup.failed', { stepId: step.id, error: dropErr.message });
+      log.jobLog(job, 'step.backup.cleanup.failed', { stepId: step.id, error: dropErr.message });
       err.message += ` (ลบตารางสำรองที่ค้างไม่สำเร็จ ต้องลบ ${step.schemaName}.${bak} เอง)`;
     }
     throw err;
@@ -410,7 +407,7 @@ async function verifyMetadata(conn, job, step) {
 async function executeStep(conn, job, step) {
   step.status = 'running';
   step.startedAt = nowIso();
-  log.jobLog(job.id, 'step.start', { stepId: step.id, kind: step.kind, table: step.tableName, sql: step.sql });
+  log.jobLog(job, 'step.start', { stepId: step.id, kind: step.kind, table: step.tableName, sql: step.sql });
   persist(job);
 
   const meta = tableMetaFor(job, step);
@@ -435,7 +432,7 @@ async function executeStep(conn, job, step) {
     // 2. backup (prepared before any mutation)
     if (!step.metadataOnly && job.options.backupStrategy && job.options.backupStrategy !== 'none') {
       step.status = 'backing_up';
-      log.jobLog(job.id, 'step.backup.start', { stepId: step.id, strategy: job.options.backupStrategy });
+      log.jobLog(job, 'step.backup.start', { stepId: step.id, strategy: job.options.backupStrategy });
       // Timed because the backup runs inside the maintenance window too, and
       // on a large table it is routinely as long as the ALTER it protects.
       const backupStarted = Date.now();
@@ -443,14 +440,14 @@ async function executeStep(conn, job, step) {
         ? await dumpTable(job, step)
         : await copyTable(conn, job, step);
       step.backupDurationMs = Date.now() - backupStarted;
-      log.jobLog(job.id, 'step.backup.done', { stepId: step.id, backup: step.backup, durationMs: step.backupDurationMs });
+      log.jobLog(job, 'step.backup.done', { stepId: step.id, backup: step.backup, durationMs: step.backupDurationMs });
     }
 
     // 3. checksum before
     if (wantChecksum) {
       step.status = 'checksum_before';
       step.checksumBefore = await checksum.tableChecksum(conn, meta, job.options.checksum || {});
-      log.jobLog(job.id, 'step.checksum.before', { stepId: step.id, digest: step.checksumBefore.digest, rowCount: step.checksumBefore.rowCount, durationMs: step.checksumBefore.durationMs });
+      log.jobLog(job, 'step.checksum.before', { stepId: step.id, digest: step.checksumBefore.digest, rowCount: step.checksumBefore.rowCount, durationMs: step.checksumBefore.durationMs });
     }
 
     // 4. the ALTER itself
@@ -458,14 +455,14 @@ async function executeStep(conn, job, step) {
     const exec = await runStatement(conn, step.sql);
     step.alterDurationMs = exec.durationMs;
     step.warnings = exec.warnings;
-    if (exec.warnings.length) log.jobLog(job.id, 'step.warnings', { stepId: step.id, warnings: exec.warnings });
+    if (exec.warnings.length) log.jobLog(job, 'step.warnings', { stepId: step.id, warnings: exec.warnings });
 
     // 5. checksum after + verdict
     if (wantChecksum) {
       step.status = 'checksum_after';
       step.checksumAfter = await checksum.tableChecksum(conn, meta, job.options.checksum || {});
       step.verify = checksum.compareChecksum(step.checksumBefore, step.checksumAfter);
-      log.jobLog(job.id, 'step.checksum.after', {
+      log.jobLog(job, 'step.checksum.after', {
         stepId: step.id, digest: step.checksumAfter.digest, rowCount: step.checksumAfter.rowCount,
         ok: step.verify.ok, issues: step.verify.issues,
       });
@@ -479,7 +476,7 @@ async function executeStep(conn, job, step) {
     // 6. metadata verification
     step.metaVerify = await verifyMetadata(conn, job, step);
     if (!step.metaVerify.ok) {
-      log.jobLog(job.id, 'step.meta.mismatch', { stepId: step.id, observed: step.metaVerify.observed });
+      log.jobLog(job, 'step.meta.mismatch', { stepId: step.id, observed: step.metaVerify.observed });
       step.findings = [{ level: 'warn', code: 'meta_not_target', message: 'metadata หลังรันยังไม่ตรงเป้าหมายทั้งหมด (อาจมีคอลัมน์ที่ตั้ง charset ไว้เฉพาะ)' }];
     }
 
@@ -487,14 +484,14 @@ async function executeStep(conn, job, step) {
     step.finishedAt = nowIso();
     job.progress.doneBytes += step.estimate.bytes;
     job.progress.doneSteps += 1;
-    log.jobLog(job.id, 'step.done', { stepId: step.id, alterDurationMs: step.alterDurationMs, verify: step.verify ? step.verify.ok : null });
+    log.jobLog(job, 'step.done', { stepId: step.id, alterDurationMs: step.alterDurationMs, verify: step.verify ? step.verify.ok : null });
   } catch (err) {
     step.status = 'failed';
     step.finishedAt = nowIso();
     step.error = err.message;
     step.checksumMismatch = !!err.checksumMismatch;
     job.progress.failedSteps += 1;
-    log.jobLog(job.id, 'step.failed', { stepId: step.id, error: err.message, checksumMismatch: step.checksumMismatch });
+    log.jobLog(job, 'step.failed', { stepId: step.id, error: err.message, checksumMismatch: step.checksumMismatch });
     throw err;
   } finally {
     persist(job);
@@ -505,7 +502,7 @@ async function executeStep(conn, job, step) {
 async function rollbackStep(conn, job, step, reason) {
   const entry = { stepId: step.id, startedAt: nowIso(), reason, statements: [], status: 'running' };
   step.rollback = entry;
-  log.jobLog(job.id, 'rollback.step.start', { stepId: step.id, reason });
+  log.jobLog(job, 'rollback.step.start', { stepId: step.id, reason });
   try {
     // A shadow copy is the fastest and most complete route: swap it back in.
     if (step.backup && step.backup.kind === 'table_copy' && job.options.preferFastRollback !== false) {
@@ -533,12 +530,12 @@ async function rollbackStep(conn, job, step, reason) {
     entry.status = entry.verify && !entry.verify.ok ? 'verify_failed' : 'done';
     step.status = 'rolled_back';
     entry.finishedAt = nowIso();
-    log.jobLog(job.id, 'rollback.step.done', { stepId: step.id, method: entry.method, verify: entry.verify ? entry.verify.ok : null });
+    log.jobLog(job, 'rollback.step.done', { stepId: step.id, method: entry.method, verify: entry.verify ? entry.verify.ok : null });
   } catch (err) {
     entry.status = 'failed';
     entry.error = err.message;
     entry.finishedAt = nowIso();
-    log.jobLog(job.id, 'rollback.step.failed', { stepId: step.id, error: err.message });
+    log.jobLog(job, 'rollback.step.failed', { stepId: step.id, error: err.message });
     throw err;
   } finally {
     persist(job);
@@ -552,7 +549,7 @@ async function withGuardedConnection(job, fn) {
   const conn = await sess.pool.getConnection();
   try {
     for (const stmt of sqlgen.sessionGuards(job.options, { ...config.runner, ...(job.options.runner || {}) })) {
-      try { await conn.query(stmt); } catch (err) { log.jobLog(job.id, 'guard.failed', { stmt, error: err.message }); }
+      try { await conn.query(stmt); } catch (err) { log.jobLog(job, 'guard.failed', { stmt, error: err.message }); }
     }
     return await fn(conn);
   } finally {
@@ -563,7 +560,7 @@ async function withGuardedConnection(job, fn) {
 async function runJob(job) {
   job.status = 'running';
   job.startedAt = nowIso();
-  log.jobLog(job.id, 'job.start', { options: job.options, steps: job.steps.length, target: job.plan.target });
+  log.jobLog(job, 'job.start', { options: job.options, steps: job.steps.length, target: job.plan.target });
   try {
     await withGuardedConnection(job, async (conn) => {
       for (const step of job.steps) {
@@ -604,10 +601,10 @@ async function runJob(job) {
   } catch (err) {
     job.status = 'failed';
     job.error = err.message;
-    log.jobLog(job.id, 'job.error', { error: err.message });
+    log.jobLog(job, 'job.error', { error: err.message });
   } finally {
     job.finishedAt = nowIso();
-    log.jobLog(job.id, 'job.finish', { status: job.status, progress: job.progress, error: job.error || null });
+    log.jobLog(job, 'job.finish', { status: job.status, progress: job.progress, error: job.error || null });
     persist(job);
   }
 }
@@ -660,7 +657,7 @@ function create({ sess, plan, tableMeta, options, preflightId, snapshotId }) {
     },
   };
   jobs.set(id, job);
-  log.audit('job.created', { jobId: id, sessionId: sess.id, steps: steps.length, options: job.options });
+  log.auditFor(sess, 'job.created', { jobId: id, sessionId: sess.id, steps: steps.length, options: job.options });
   persist(job);
   return job;
 }
@@ -671,12 +668,12 @@ function start(job) {
   return job;
 }
 
-async function rollbackJob(jobId, { stepIds } = {}) {
-  const job = jobs.get(jobId);
+async function rollbackJob(jobId, { stepIds, conn } = {}) {
+  const job = get(jobId, conn);
   if (!job) throw new Error('ไม่พบ job');
   if (!TERMINAL.has(job.status)) throw new Error('job ยังทำงานอยู่ — หยุดก่อนจึงจะ rollback ได้');
   job.status = 'rolling_back';
-  log.jobLog(job.id, 'rollback.job.start', { stepIds: stepIds || 'all-completed' });
+  log.jobLog(job, 'rollback.job.start', { stepIds: stepIds || 'all-completed' });
   const targets = [...job.steps].reverse().filter((s) =>
     (s.status === 'done' || s.status === 'failed') && (!stepIds || stepIds.includes(s.id)));
   const results = [];
@@ -692,7 +689,7 @@ async function rollbackJob(jobId, { stepIds } = {}) {
     job.error = `rollback ล้มเหลว: ${err.message}`;
     throw err;
   } finally {
-    log.jobLog(job.id, 'rollback.job.finish', { status: job.status, rolledBack: results.length });
+    log.jobLog(job, 'rollback.job.finish', { status: job.status, rolledBack: results.length });
     persist(job);
   }
   return { job: snapshot(job, { includeSteps: true }), results };
@@ -734,40 +731,56 @@ function snapshot(job, { includeSteps = false } = {}) {
   return base;
 }
 
-const get = (id) => jobs.get(id) || null;
-const list = () => [...jobs.values()].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)).map((j) => snapshot(j));
+/**
+ * A job, but only when it belongs to `conn`.
+ *
+ * `jobs` is a per-process Map, so a run against uat is still in memory after
+ * the operator reconnects to prod. Scoping the lookup keeps one endpoint's
+ * work out of another's windows, and out of its cancel/pause/rollback buttons.
+ */
+function get(id, conn) {
+  const job = jobs.get(id) || null;
+  if (!job) return null;
+  if (conn && !store.sameEndpoint(job.connection, conn)) return null;
+  return job;
+}
+const list = (conn) => [...jobs.values()]
+  .filter((j) => !conn || store.sameEndpoint(j.connection, conn))
+  .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+  .map((j) => snapshot(j));
 
-function cancel(id) {
-  const job = jobs.get(id);
+function cancel(id, conn) {
+  const job = get(id, conn);
   if (!job) return false;
   job.cancelRequested = true;
   job.pauseRequested = false;
-  log.jobLog(id, 'job.cancel.requested', {});
+  log.jobLog(job, 'job.cancel.requested', {});
   return true;
 }
 
-function pause(id, paused) {
-  const job = jobs.get(id);
+function pause(id, paused, conn) {
+  const job = get(id, conn);
   if (!job) return false;
   job.pauseRequested = !!paused;
-  log.jobLog(id, paused ? 'job.pause' : 'job.resume', {});
+  log.jobLog(job, paused ? 'job.pause' : 'job.resume', {});
   return true;
 }
 
-/** Jobs persisted by an earlier process run, for the log viewer. */
-function listArchived() {
-  return log.listJson(config.paths.jobs)
-    .filter((id) => !jobs.has(id))
-    .map((id) => {
-      const j = log.readJson(config.paths.jobs, id);
-      return j ? { ...j, steps: undefined, archived: true } : null;
+/** Jobs this endpoint ran in an earlier process, for the log viewer. */
+function listArchived(conn) {
+  return store.listJson(conn, 'jobs')
+    .filter((e) => !get(e.id, conn))
+    .map((e) => {
+      const j = store.readJson(conn, 'jobs', e.id);
+      return j ? { ...j.data, steps: undefined, archived: true, legacy: j.legacy } : null;
     })
     .filter(Boolean)
     .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
 }
 
-function readArchived(id) {
-  return log.readJson(config.paths.jobs, id);
+function readArchived(conn, id) {
+  const hit = store.readJson(conn, 'jobs', id);
+  return hit ? { ...hit.data, legacy: hit.legacy } : null;
 }
 
 module.exports = {

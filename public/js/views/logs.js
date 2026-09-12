@@ -61,8 +61,11 @@ const clock = (iso) => (iso ? new Date(iso).toLocaleTimeString('th-TH', { hour12
 
 export async function render(host) {
   let days = [];
+  let endpoint = '';
   try {
-    days = (await api.auditDays()).days || [];
+    const r = await api.auditDays();
+    days = r.days || [];
+    endpoint = r.endpoint || '';
   } catch (err) {
     host.innerHTML = note('crit', 'อ่านรายการไฟล์บันทึกไม่สำเร็จ', esc(err.message));
     return;
@@ -98,6 +101,8 @@ export async function render(host) {
       </div>
       <div class="row-tight" id="lg-cats"></div>
       <p class="hint" id="lg-meta"></p>
+      <p class="hint">บันทึกแยกตามเครื่องปลายทาง กำลังดูของ <span class="mono">${esc(endpoint)}</span>
+        รวมกับเหตุการณ์ระดับโปรเซส เช่น สตาร์ท/หยุดเซิร์ฟเวอร์ ซึ่งไม่ได้เป็นของเครื่องไหน</p>
     </div>
 
     <div class="card">
@@ -139,10 +144,14 @@ function enrich(rec) {
   const event = String(rec.event || (rec.raw !== undefined ? 'raw.unparsed' : '—'));
   const rest = { ...rec };
   delete rest.ts; delete rest.event; delete rest.jobId;
+  delete rest.host; delete rest.port;
   const detail = JSON.stringify(rest);
   return {
     rec,
     event,
+    // Absent on process-level events, and on every line written before logs
+    // were split by endpoint.
+    endpoint: rec.host ? `${rec.host}${rec.port ? `:${rec.port}` : ''}` : '',
     ts: rec.ts || '',
     jobId: rec.jobId || '',
     prefix: event.split('.')[0] || '—',
@@ -231,10 +240,11 @@ function table(list) {
   if (!rows.length) return '<div class="empty">ไม่มีเหตุการณ์ในไฟล์นี้</div>';
   if (!list.length) return '<div class="empty">ไม่มีเหตุการณ์ที่ตรงกับตัวกรอง</div>';
   return `<div class="table-wrap"><table>
-    <thead><tr><th>เวลา</th><th>event</th><th>jobId</th><th>รายละเอียด</th></tr></thead>
+    <thead><tr><th>เวลา</th><th>event</th><th>เครื่อง</th><th>jobId</th><th>รายละเอียด</th></tr></thead>
     <tbody>${list.map((r, i) => `<tr data-idx="${i}" class="${r.failed ? 'row-crit' : ''}">
       <td class="nowrap">${esc(localTime(r.ts))}</td>
       <td class="nowrap">${chip(r.event, eventKind(r.event))}</td>
+      <td class="mono nowrap trunc" title="${esc(r.endpoint || 'ไม่ระบุ — เป็นเหตุการณ์ระดับโปรเซส หรือบรรทัดเก่าก่อนแยกเครื่อง')}">${esc(r.endpoint || '—')}</td>
       <td class="mono nowrap">${r.jobId ? esc(r.jobId) : '—'}</td>
       <td class="mono trunc" title="${esc(r.detail || '{}')}">${esc(r.detail || '—')}</td>
     </tr>`).join('')}</tbody>

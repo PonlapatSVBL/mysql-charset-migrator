@@ -121,7 +121,7 @@ async function create({ host, port, user, password, database, ssl }) {
     lastSeenAt: Date.now(),
   };
   sessions.set(id, session);
-  log.audit('session.connect', {
+  log.auditFor(session, 'session.connect', {
     sessionId: id, host, port: session.port, user,
     passwordFingerprint: fp, serverVersion: info.version, readOnly: info.readOnly,
   });
@@ -138,7 +138,7 @@ function get(id) {
 /** Reveal the password only to in-process consumers that genuinely need it
  *  (currently: mysqldump backups). Every call is audited. */
 function revealPassword(session, reason) {
-  log.audit('session.credential.reveal', { sessionId: session.id, reason });
+  log.auditFor(session, 'session.credential.reveal', { sessionId: session.id, reason });
   return unseal(session.sealed);
 }
 
@@ -150,7 +150,7 @@ async function destroy(id, reason = 'manual') {
   try { log.forgetSecret(unseal(s.sealed)); } catch { /* ignore */ }
   wipe(s.sealed);
   s.sealed = null;
-  log.audit('session.disconnect', { sessionId: id, reason });
+  log.auditFor(s, 'session.disconnect', { sessionId: id, reason });
   return true;
 }
 

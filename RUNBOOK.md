@@ -98,11 +98,11 @@ npm run check     # static import check + 38 self-tests → ต้องได�
 
 | ไฟล์ | ใครสร้าง | ใครอ่าน |
 |---|---|---|
-| `data/snapshots/preflight-*.json` | operator | verifier — ตีความ finding (3.2) |
-| `data/snapshots/checksum-*.json` | operator | verifier — เทียบ baseline (7.2) |
-| `data/plans/plan-*.json` | operator | verifier — อ่านทาน DDL (5.2), perf owner — ตารางใหญ่ (6.3) |
-| `data/jobs/job-*.json` + `.ndjson` | เครื่องมือ | ทุกคน — สภาพจริงถ้าแอป restart (Abort ข้อ 21) |
-| `data/audit/audit-*.ndjson` | เครื่องมือ | verifier — หลักฐานปิดงาน (9.5) |
+| `data/hosts/<host>_<port>/snapshots/preflight-*.json` | operator | verifier — ตีความ finding (3.2) |
+| `data/hosts/<host>_<port>/snapshots/checksum-*.json` | operator | verifier — เทียบ baseline (7.2) |
+| `data/hosts/<host>_<port>/plans/plan-*.json` | operator | verifier — อ่านทาน DDL (5.2), perf owner — ตารางใหญ่ (6.3) |
+| `data/hosts/<host>_<port>/jobs/job-*.json` + `.ndjson` | เครื่องมือ | ทุกคน — สภาพจริงถ้าแอป restart (Abort ข้อ 21) |
+| `data/hosts/<host>_<port>/audit/audit-*.ndjson` | เครื่องมือ | verifier — หลักฐานปิดงาน (9.5) |
 
 อ้าง `preflightId` / `checksumId` / `planId` / `jobId` ในทุกการสื่อสารระหว่าง window
 
@@ -168,7 +168,7 @@ SELECT ROUND(SUM(DATA_LENGTH + INDEX_LENGTH)/1024/1024/1024, 2) AS total_gb
 ```
 
 **ถ้าจะใช้ `backupStrategy: table_copy` ต้องบวกเนื้อที่เพิ่มอีกเท่าตารางที่ใหญ่ที่สุดด้วย** (shadow table อยู่ใน DB เดียวกัน)
-ถ้าใช้ `mysqldump` เนื้อที่ไปกินที่ filesystem ของเครื่องที่รันแอปนี้ (`data/jobs/<jobId>-backup/`) ไม่ใช่ที่ DB server
+ถ้าใช้ `mysqldump` เนื้อที่ไปกินที่ filesystem ของเครื่องที่รันแอปนี้ (`data/hosts/<host>_<port>/jobs/<jobId>-backup/`) ไม่ใช่ที่ DB server
 
 ```bash
 # เนื้อที่ว่างของ datadir บน DB server
@@ -370,7 +370,7 @@ API จะปฏิเสธ (`HTTP 400 one_table_at_a_time`) ถ้าขอบ
 แต่ก็ยังกิน I/O ได้มาก ให้รันในช่วงที่โหลดต่ำ
 
 เมื่อเสร็จ **จด `preflightId`** ไว้ (รูปแบบ `preflight-YYYYMMDDHHMMSS-xxxxxx`) — ต้องใช้เปิด gate ตอนสร้าง job
-และผลถูกเก็บถาวรที่ `data/snapshots/<id>.json`
+และผลถูกเก็บถาวรที่ `data/hosts/<host>_<port>/snapshots/<id>.json` — แยกตามเครื่อง จึงเอา baseline ของอีกเครื่องมาเทียบไม่ได้ ถ้าลองจะได้ error ที่บอกชื่อทั้งสองเครื่อง
 
 ### 3.2 ตีความ finding และวิธีแก้ทีละกรณี
 

@@ -19,6 +19,38 @@ const BYTES_PER_CHAR = {
 
 const bpc = (cs) => BYTES_PER_CHAR[String(cs || '').toLowerCase()] ?? 4;
 
+/**
+ * The only charsets MySQL ships whose repertoire reaches past the Basic
+ * Multilingual Plane. Everything else - latin1, tis620, big5, sjis, ucs2, the
+ * lot - maps entirely inside the BMP, so it survives a trip into utf8mb3
+ * intact even though the byte width changes.
+ */
+const ASTRAL_CHARSETS = new Set(['utf8mb4', 'utf16', 'utf16le', 'utf32', 'gb18030']);
+const BMP_UNICODE_CHARSETS = new Set(['utf8', 'utf8mb3', 'ucs2']);
+
+/**
+ * Can every character `source` is able to hold also be stored in `target`?
+ *
+ * This asks about repertoires, not byte widths, and the two point opposite
+ * ways: latin1 -> utf8mb3 triples the width per character and cannot lose one,
+ * while utf8mb4 -> utf8mb3 narrows it and drops every emoji it meets.
+ *
+ * `binary` is never a subset of anything (its "characters" are arbitrary
+ * bytes), and a name this module has never heard of is treated as unsafe on
+ * purpose - the caller uses this to decide what to tick by default, so an
+ * unknown charset must fall on the side that does nothing.
+ */
+function repertoireFits(source, target) {
+  const s = String(source || '').toLowerCase();
+  const t = String(target || '').toLowerCase();
+  if (!s || !t || s === 'binary' || t === 'binary') return false;
+  if (!(s in BYTES_PER_CHAR) || !(t in BYTES_PER_CHAR)) return false;
+  if (s === t) return true;
+  if (ASTRAL_CHARSETS.has(t)) return true;                  // holds all of Unicode
+  if (BMP_UNICODE_CHARSETS.has(t)) return !ASTRAL_CHARSETS.has(s);
+  return false;                                             // legacy target: only itself
+}
+
 const INDEXED_TEXT_TYPES = /^(char|varchar|tinytext|text|mediumtext|longtext|enum|set)$/i;
 
 function indexByteLimit(table) {
@@ -467,4 +499,5 @@ function renderScript(plan, direction = 'forward') {
 module.exports = {
   buildPlan, renderScript, columnDefinition, defaultClause, tableRisks,
   needsColumnChange, sessionGuards, alterSuffix, impossibleDdlRisk, bpc, indexByteLimit,
+  repertoireFits,
 };
