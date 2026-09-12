@@ -31,6 +31,27 @@ export async function render(host) {
   draw(host, d, pending);
 }
 
+/**
+ * Every size and row count on this page comes from information_schema, which on
+ * MySQL 8 serves them from a cache up to `information_schema_stats_expiry`
+ * seconds old - a day, by default. Sessions ask for 0 so the numbers are live,
+ * but a server that refuses (no SUPER, a managed instance that pins it) would
+ * otherwise leave the page looking authoritative while showing yesterday.
+ *
+ * Collation and charset are not statistics: those are dictionary columns and
+ * are always current, so "how many tables are left" stays right either way.
+ * It is the byte figures - the ones this page is built around - that drift.
+ */
+function staleStatsNote() {
+  const expiry = (state.session && state.session.server && state.session.server.statsExpiry);
+  if (!expiry) return '';   // 0 = live, null = server has no such cache
+  return note('warn', 'ตัวเลขขนาดอาจไม่ใช่ของล่าสุด',
+    `เซิร์ฟเวอร์นี้ยังตั้ง <code>information_schema_stats_expiry = ${num(expiry)}</code> วินาที `
+    + 'ขนาดตารางและจำนวนแถวจึงอาจเก่าได้ถึงเท่านั้น ตารางที่เพิ่งแปลงเสร็จอาจยังโชว์ขนาดเดิมอยู่ '
+    + '(จำนวนตาราง/คอลัมน์ที่เหลือไม่ได้รับผลกระทบ เพราะ collation ไม่ใช่ค่าสถิติ) '
+    + 'สั่ง <code>ANALYZE TABLE</code> หรือให้สิทธิ์ session ตั้งค่านี้เป็น 0 เพื่อให้ตัวเลขสด');
+}
+
 function draw(host, d, pending) {
   const t = state.target;
   const oo = d.otherObjects || {};
@@ -51,6 +72,7 @@ function draw(host, d, pending) {
   const heaviest = shown.length ? shown[0] : null;
 
   host.innerHTML = `
+    ${staleStatsNote()}
     <div class="card">
       <div class="cta">
         <div>

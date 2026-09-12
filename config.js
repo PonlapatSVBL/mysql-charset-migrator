@@ -28,6 +28,19 @@ module.exports = {
   pool: {
     connectionLimit: Number(process.env.CSMIG_POOL_LIMIT || 4),
     connectTimeoutMs: 15000,
+    // MySQL 8.0 serves TABLE_ROWS, DATA_LENGTH and INDEX_LENGTH out of a cache
+    // refreshed only once it is older than information_schema_stats_expiry -
+    // 86400 by default, a whole day. Every size and row count this console
+    // shows comes from those columns, so on the default a table converted ten
+    // minutes ago keeps yesterday's size on the overview, and the strategy
+    // heuristics size tonight's work against numbers from yesterday too.
+    //
+    // Set to 0 per session so information_schema asks the storage engine
+    // instead. That costs a round trip per table on the wider queries, which is
+    // the right trade for a console whose whole job is watching these numbers
+    // move. Set CSMIG_FRESH_STATS=0 on an instance with enough tables that the
+    // inventory page becomes slow.
+    freshStats: process.env.CSMIG_FRESH_STATS !== '0',
   },
 
   // Safety defaults for the ALTER runner. Steps always run one at a time, on a

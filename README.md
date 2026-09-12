@@ -844,6 +844,7 @@ env var ทั้งหมดที่ `config.js` และ `security.js` อ�
 | `CSMIG_TARGET_COLLATION` | `utf8mb3_general_ci` | collation เป้าหมายเริ่มต้น (override ด้วย `targetCollation`) |
 | `CSMIG_IDLE_TIMEOUT_MS` | `1800000` (30 นาที) | ไม่มี request เข้ามาเกินนี้ → session ถูกทำลาย, pool ปิด, vault ถูก wipe |
 | `CSMIG_POOL_LIMIT` | `4` | `connectionLimit` ของ mysql2 pool ต่อ session |
+| `CSMIG_FRESH_STATS` | `1` | ตั้ง `information_schema_stats_expiry = 0` ต่อ session เพื่อให้ขนาด/จำนวนแถวสดเสมอ ตั้ง `0` ถ้า instance มีตารางเยอะจนหน้า inventory ช้า |
 | `CSMIG_MAX_THREADS_RUNNING` | `40` | เพดาน `Threads_running` ที่ยอมให้เริ่ม rebuild — สูงกว่านี้ job จะรอ |
 | `CSMIG_MAX_REPLICA_LAG` | `30` | เพดาน replica lag (วินาที) ที่ยอมให้เริ่ม rebuild |
 | `CSMIG_STMT_TIMEOUT` | `0` (ไม่จำกัด) | timeout ของ connection ที่ **รัน job** > 0 → `SET SESSION max_execution_time = <ค่า × 1000>` **หมายเหตุ: MySQL ใช้กับ `SELECT` เท่านั้น ไม่จำกัดเวลา `ALTER`** · การสแกนอ่านอย่างเดียวใช้ `CSMIG_SCAN_TIMEOUT` แยกต่างหาก |

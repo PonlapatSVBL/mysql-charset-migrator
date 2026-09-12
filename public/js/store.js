@@ -62,6 +62,20 @@ function persist() {
 }());
 
 /**
+ * A run just changed the thing these describe.
+ *
+ * Schema lists, filter facets and the overview summary are all derived from
+ * charsets and collations, which is exactly what a migration moves. Keeping
+ * them across a completed job is how the overview goes on reporting work that
+ * is already done.
+ */
+export function invalidateInventory() {
+  cache.schemas = null;
+  cache.facets = null;
+  cache.summary = null;
+}
+
+/**
  * Point the workspace at one endpoint. Called from setSession(), which is the
  * only place the answer changes.
  */
@@ -74,9 +88,7 @@ export function useEndpoint(ep) {
   work.current = mine.current || null;
   work.byTable = mine.byTable || {};
   // Schema lists and summaries describe the endpoint too.
-  cache.schemas = null;
-  cache.facets = null;
-  cache.summary = null;
+  invalidateInventory();
   persist();
 }
 

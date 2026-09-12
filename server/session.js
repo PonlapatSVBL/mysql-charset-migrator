@@ -46,6 +46,14 @@ async function probe(conn) {
     const [rows] = await conn.query('SHOW GRANTS');
     grants = rows.map((r) => Object.values(r)[0]);
   } catch { /* not fatal */ }
+  // Read back rather than assumed: whether the numbers on every page are live
+  // or up to a day old is the kind of thing an operator has to be told, not
+  // promised. null means the server has no such cache at all.
+  let statsExpiry = null;
+  try {
+    const [[row]] = await conn.query('SELECT @@session.information_schema_stats_expiry AS v');
+    statsExpiry = Number(row.v);
+  } catch { /* MariaDB / MySQL 5.7 - no cache in front of these columns */ }
   let replica = null;
   try {
     const [rows] = await conn.query('SHOW REPLICA STATUS');
@@ -66,6 +74,7 @@ async function probe(conn) {
     collationServer: ver.collationServer,
     readOnly: !!Number(ver.readOnly),
     rowFormat: ver.rowFormat,
+    statsExpiry,
     replica,
     canAlter,
     // never include grants verbatim if they contain IDENTIFIED BY - logger scrubs, but
@@ -98,6 +107,16 @@ async function create({ host, port, user, password, database, ssl }) {
   };
 
   const pool = mysql.createPool(poolOptions);
+  // Applied to every connection the pool opens, not just the first: it is a
+  // SESSION variable, and a query that lands on a later connection would
+  // otherwise quietly fall back to day-old statistics.
+  if (config.pool.freshStats) {
+    pool.pool.on('connection', (conn) => {
+      // MySQL 8.0 only. MariaDB and 5.7 reject the statement and need no such
+      // defeating - they have no dictionary cache in front of these columns.
+      conn.query('SET SESSION information_schema_stats_expiry = 0', () => {});
+    });
+  }
   let info;
   try {
     const conn = await pool.getConnection();

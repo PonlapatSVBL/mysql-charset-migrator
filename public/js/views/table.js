@@ -7,6 +7,7 @@
 import { api, state } from '../api.js';
 import {
   work, tableState, setTableState, openTable, resetTable, splitKey, tableBody, nextStep,
+  invalidateInventory,
 } from '../store.js';
 import { navigate } from '../app.js';
 import {
@@ -1115,6 +1116,9 @@ function watchJob(host, id, dryRun = false) {
     });
     if (['done', 'failed', 'cancelled', 'rolled_back'].includes(job.status)) {
       stopPoll(t);
+      // Whatever the outcome, the instance is not what it was: even a failed
+      // run can have converted some steps before it stopped.
+      if (!dryRun) invalidateInventory();
       if (!dryRun) setTableState(key, { jobStatus: job.status });
       toast(job.status === 'done'
         ? (dryRun ? 'ลองรันเสร็จแล้ว' : 'รันเสร็จแล้ว')
