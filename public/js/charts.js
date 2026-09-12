@@ -211,11 +211,29 @@ export function donutLegend(slices) {
  * percentage. A per-row percentage bar draws a 4 GB schema and a 4 MB one
  * exactly the same.
  */
-export function miniStack(done, pending, max) {
+/**
+ * A two-segment completion bar: what is done, then what is left, together
+ * filling the rail whatever the row's totals are.
+ *
+ * It used to scale against the largest row in the table, which made the length
+ * encode how many tables a schema has - something the count column beside it
+ * already says - and left a fully converted schema of five tables drawing a
+ * stub next to a fully converted schema of two hundred. Both are finished, the
+ * column is headed "ที่เรียบร้อยแล้ว", and now both bars are full.
+ *
+ * The remainder is measured as what is left of the rail rather than scaled on
+ * its own, so the two segments tile it exactly instead of leaving a rounding
+ * seam at the right edge on the rows that are complete.
+ */
+export function miniStack(done, total) {
   const W = 150;
-  const scale = max > 0 ? W / max : 0;
-  const d = round(Math.max(Number(done) || 0, 0) * scale);
-  const p = round(Math.max(Number(pending) || 0, 0) * scale);
+  const all = Math.max(Number(total) || 0, 0);
+  // Nothing to be done is not the same as nothing done yet: an empty schema
+  // gets the bare rail rather than a full bar of "pending".
+  if (!all) return frame(W, 14, `<rect class="ch-rail" x="0" y="5" width="${W}" height="4" rx="2"/>`, 'chart-mini');
+  const ratio = Math.min(Math.max(Number(done) || 0, 0), all) / all;
+  const d = round(ratio * W);
+  const p = round(W - d);
   return frame(W, 14, `
     <rect class="ch-rail" x="0" y="5" width="${W}" height="4" rx="2"/>
     ${d > 0.4 ? `<rect class="ch-ok" x="0" y="2" width="${d}" height="10" rx="2"/>` : ''}

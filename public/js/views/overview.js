@@ -158,12 +158,11 @@ function divergenceNote(d, doneBytes) {
 }
 
 function schemaRows(d, t) {
-  const maxTables = Math.max(...d.schemas.rows.map((s) => s.tables), 1);
   return d.schemas.rows.map((s) => `<tr>
     <td class="mono"><button class="btn-sm btn-ghost" data-schema="${esc(s.schemaName)}">${esc(s.schemaName)}</button></td>
     <td class="mono">${chip(`${s.schemaCharset} / ${s.schemaCollation}`, s.schemaCollation === t.collation ? 'chip-ok' : 'chip-bad')}</td>
     <td class="num">${num(s.tables)}</td>
-    <td>${miniStack(s.compliantTables, s.tables - s.compliantTables, maxTables)}
+    <td>${miniStack(s.compliantTables, s.tables)}
         <div class="hint">${num(s.compliantTables)} / ${num(s.tables)} (${pct(s.tablePct)})</div></td>
     <td class="num nowrap">${bytes(s.sizeBytes)}</td>
   </tr>`).join('');
