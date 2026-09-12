@@ -412,6 +412,29 @@ digest แบบเต็มตารางบนตาราง 60 GB คือ
 | `pk_head` | เกินเพดานใดเพดานหนึ่ง **และ** มี primary key ที่ลำดับไม่เปลี่ยน | `ORDER BY <pk> LIMIT 200000` |
 | `rowcount` | เกินเพดาน และไม่มี PK แบบนั้น | `COUNT(*)` อย่างเดียว |
 
+### foreign key บนคอลัมน์ข้อความ
+
+MySQL ถือว่า charset เป็นส่วนหนึ่งของคำว่า "compatible" ระหว่างสองฝั่งของ foreign key
+การแปลงฝั่งเดียวจึงถูกปฏิเสธทันที:
+
+```
+Referencing column 'external_training_request_id' and referenced column
+'external_training_request_id' in foreign key constraint
+'fk_training_attachment' are incompatible.
+```
+
+**การสลับลำดับไม่ช่วย** ไม่ว่าจะแปลง parent หรือ child ก่อน ก็ต้องผ่านสถานะที่สองฝั่งไม่ตรงกันเหมือนกัน
+ทางออกมีสองทางเท่านั้น:
+
+1. ติ๊ก **“ปิด FOREIGN_KEY_CHECKS ระหว่างรัน”** (ตัวเลือกขั้นสูงของขั้น 3) แล้วแปลงทั้งสองฝั่งให้ครบ —
+   `SET SESSION foreign_key_checks = 0` ทำให้ MySQL ยอมรับสถานะกลางทาง แต่ถ้าแปลงไม่ครบทั้งสองฝั่ง
+   จะเหลือ constraint ที่สองฝั่งคนละ charset ค้างไว้ ซึ่งจะไปโผล่เป็นปัญหาใน DDL ครั้งถัดไป
+2. `DROP FOREIGN KEY` ทิ้งก่อน แปลงทั้งสองฝั่ง แล้ว `ADD CONSTRAINT` กลับ
+
+เครื่องมือนี้ดึง charset/collation ของ **ทั้งสองฝั่ง** มาตอนสร้างแผน (`queries.tablesForPlan` join
+`information_schema.COLUMNS` สองครั้ง) จึงบอกได้ก่อนรันว่าคำสั่งนี้จะถูกปฏิเสธหรือไม่ ไม่ใช่เตือนลอยๆ ว่า
+"มี FK นะ" เหมือนเดิม
+
 **ทำไมต้องดูจำนวนแถวด้วย ไม่ใช่แค่ขนาด** — ตารางแคบๆ ที่มี 3.6 ล้านแถวกินพื้นที่ไม่ถึงเพดาน 2 GB
 แต่ใช้เวลา hash นานเกิน `scan.statementTimeoutSec` (60 วินาที) แล้ว digest ก็ถูก MySQL ตัดทิ้งกลางคัน
 digest ที่ timeout ไม่ใช่ baseline — มันคือตารางที่ไม่มี baseline แต่ดูเหมือนมี
@@ -486,7 +509,9 @@ PK ที่เป็น text จะถูก **จัดลำดับให�
 | `unique_collation` | warn | มีคอลัมน์ `UNI` หรือ UNIQUE index ครอบคอลัมน์ที่จะเปลี่ยน collation |
 | `partitioned` | warn | ตารางมี partition (ALTER จะ rebuild ทุก partition) |
 | `fulltext` | warn | มี FULLTEXT index (สร้างใหม่หมด ผลค้นหาอาจเปลี่ยนตาม collation) |
-| `fk_text_columns` | warn | มี foreign key บนคอลัมน์ข้อความ (charset ฝั่ง parent/child ต้องตรงกัน) |
+| `fk_charset_mismatch` | **critical** | คอลัมน์ที่จะแปลงเป็นปลายข้างหนึ่งของ foreign key ที่อีกฝั่งยังเป็น charset เดิม — MySQL จะปฏิเสธด้วย `are incompatible` ข้อความบอกชื่อ constraint และตาราง/คอลัมน์อีกฝั่งให้ |
+| `fk_partner_unknown` | warn | อ่าน charset ของอีกฝั่งไม่ได้ (มักเพราะ user มองไม่เห็น schema นั้น) — ยังไม่รู้ว่าจะผ่านหรือไม่ |
+| `fk_text_columns` | info | มี foreign key บนคอลัมน์ข้อความ แต่อีกฝั่งเป็น target อยู่แล้ว รอบนี้จะทำให้ตรงกันพอดี |
 | `generated_columns` | warn | มี generated column ที่เป็นข้อความในชุดที่จะเปลี่ยน |
 | `index_too_long` | critical | ผลรวมไบต์ของ index เกินเพดาน (คำนวณเฉพาะกรณี **widening** — ดู "ข้อจำกัดที่ทราบ") |
 | `row_too_large` | critical | ผลรวมความยาวคอลัมน์ข้อความเกิน 65,535 ไบต์ (widening เท่านั้น) |

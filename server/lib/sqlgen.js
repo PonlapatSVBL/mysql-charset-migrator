@@ -161,8 +161,102 @@ function impossibleDdlRisk(options) {
   return risks;
 }
 
+/**
+ * What happens to the two ends of a text foreign key.
+ *
+ * MySQL refuses an ALTER that would leave them incompatible:
+ *
+ *   Referencing column 'x' and referenced column 'x' in foreign key constraint
+ *   'fk_y' are incompatible.
+ *
+ * and charset is part of "compatible". Converting one side alone therefore
+ * fails outright - and so does converting the other side first, since either
+ * order passes through the same mismatched intermediate state. There is no
+ * ordering that avoids it; the only ways through are to convert both ends
+ * while foreign_key_checks is off, or to drop the constraint and rebuild it
+ * afterwards.
+ *
+ * This used to be one blanket warning on every text FK, which said "convert
+ * both together or turn FOREIGN_KEY_CHECKS off" without knowing whether
+ * anything was actually wrong - and pointed at an option the UI never offered.
+ * Now the counterpart's own charset decides: an ALTER that will be rejected is
+ * critical and names the table to convert with it.
+ */
+function foreignKeyRisks(table, target, changing, options = {}) {
+  const risks = [];
+  const changingNames = new Set(changing.map((c) => c.columnName));
+  const blocked = [];
+  const unknown = [];
+
+  for (const f of table.foreignKeys || []) {
+    const outbound = f.direction === 'outbound';
+    const mine = outbound ? f.columnName : f.refColumn;
+    if (!changingNames.has(mine)) continue;
+    const theirCharset = outbound ? f.parentCharset : f.childCharset;
+    const theirCollation = outbound ? f.parentCollation : f.childCollation;
+    const theirType = outbound ? f.parentType : f.childType;
+    const otherName = outbound
+      ? `${f.refSchema}.${f.refTable}.${f.refColumn}`
+      : `${f.schemaName}.${f.tableName}.${f.columnName}`;
+    // No type at all means the counterpart could not be read - a column in a
+    // schema this login cannot see, or metadata from before both ends were
+    // fetched. Unknown is not the same as fine, and must not read as fine.
+    if (!theirType) { unknown.push({ name: f.name, other: otherName }); continue; }
+    // A non-text counterpart cannot disagree about a charset.
+    if (!theirCharset) continue;
+    if (theirCharset === target.charset && theirCollation === target.collation) continue;
+    blocked.push({ name: f.name, column: mine, other: otherName, otherCharset: `${theirCharset} / ${theirCollation}` });
+  }
+
+  if (unknown.length) {
+    risks.push({
+      level: 'warn', code: 'fk_partner_unknown',
+      message: `อ่าน charset ของอีกฝั่ง foreign key ไม่ได้ (${unknown.map((u) => `${u.name} → ${u.other}`).join(', ')}) `
+        + 'อาจเป็นเพราะ user นี้มองไม่เห็น schema นั้น — ตรวจเองก่อนว่าอีกฝั่งเป็น charset อะไร '
+        + 'ถ้าไม่ตรงกับ target MySQL จะปฏิเสธคำสั่งด้วย "are incompatible"',
+      constraints: unknown.map((u) => u.name),
+    });
+  }
+
+  if (blocked.length) {
+    const lines = blocked.map((b) => `${b.name}: ${b.column} ↔ ${b.other} (${b.otherCharset})`).join(' · ');
+    risks.push({
+      level: 'critical',
+      code: 'fk_charset_mismatch',
+      message: options.disableFkChecks
+        ? `คำสั่งนี้จะทำให้สองฝั่งของ foreign key เป็นคนละ charset ชั่วคราว (${lines}) `
+          + 'แผนนี้ปิด FOREIGN_KEY_CHECKS ไว้แล้ว MySQL จึงยอมให้ผ่าน แต่ต้องแปลงอีกฝั่งให้เป็น '
+          + `${target.charset} / ${target.collation} ด้วย ไม่งั้นจะเหลือ constraint ที่สองฝั่งไม่ตรงกันค้างไว้`
+        : `MySQL จะปฏิเสธคำสั่งนี้ทันที ด้วย "are incompatible" เพราะอีกฝั่งของ foreign key ยังเป็น charset เดิม (${lines}) `
+          + 'การสลับลำดับไม่ช่วย เพราะไม่ว่าจะแปลงฝั่งไหนก่อนก็ผ่านสถานะที่สองฝั่งไม่ตรงกันเหมือนกัน — '
+          + 'ให้เปิด "ปิด FOREIGN_KEY_CHECKS ระหว่างรัน" ในตัวเลือกขั้นสูง แล้วแปลงอีกฝั่งให้ครบในรอบเดียวกัน '
+          + 'หรือ drop constraint ทิ้งก่อนแล้วสร้างใหม่หลังแปลงเสร็จ',
+      columns: blocked.map((b) => b.column),
+      constraints: [...new Set(blocked.map((b) => b.name))],
+      partners: [...new Set(blocked.map((b) => b.other))],
+    });
+  }
+
+  // Text FKs whose other end already matches: nothing will be rejected, but the
+  // constraint is still worth naming - it is why the column cannot be left out.
+  const settled = (table.foreignKeys || []).filter((f) => {
+    const mine = f.direction === 'outbound' ? f.columnName : f.refColumn;
+    const theirs = f.direction === 'outbound' ? f.parentCharset : f.childCharset;
+    return changingNames.has(mine) && theirs
+      && !blocked.some((b) => b.name === f.name) && !unknown.some((u) => u.name === f.name);
+  });
+  if (settled.length) {
+    risks.push({
+      level: 'info', code: 'fk_text_columns',
+      message: `คอลัมน์ที่จะแปลงมี foreign key อยู่ (${[...new Set(settled.map((f) => f.name))].join(', ')}) `
+        + `อีกฝั่งเป็น ${target.charset} / ${target.collation} อยู่แล้ว การแปลงรอบนี้จะทำให้สองฝั่งตรงกันพอดี`,
+    });
+  }
+  return risks;
+}
+
 /** Static (metadata-only) risk flags for one table. */
-function tableRisks(table, target, pick = null) {
+function tableRisks(table, target, pick = null, options = {}) {
   const risks = [];
   const changing = table.columns.filter((c) => needsColumnChange(c, target, pick));
   const srcWidths = [...new Set(changing.map((c) => bpc(c.columnCharset)))];
@@ -182,16 +276,7 @@ function tableRisks(table, target, pick = null) {
   if (table.indexes.some((i) => String(i.indexType).toUpperCase() === 'FULLTEXT')) {
     risks.push({ level: 'warn', code: 'fulltext', message: 'มี FULLTEXT index — จะถูกสร้างใหม่ทั้งหมด และผลการค้นหาอาจเปลี่ยนตาม collation ใหม่' });
   }
-  const textFk = table.foreignKeys.filter((f) => {
-    const col = table.columns.find((c) => c.columnName === (f.direction === 'outbound' ? f.columnName : f.refColumn));
-    return col && col.columnCharset;
-  });
-  if (textFk.length) {
-    risks.push({
-      level: 'warn', code: 'fk_text_columns',
-      message: `มี foreign key บนคอลัมน์ข้อความ (${textFk.map((f) => f.name).filter((v, i, a) => a.indexOf(v) === i).join(', ')}) — charset/collation ของฝั่ง parent และ child ต้องตรงกัน ควรแปลงพร้อมกันในรอบเดียว หรือใช้ตัวเลือกปิด FOREIGN_KEY_CHECKS`,
-    });
-  }
+  risks.push(...foreignKeyRisks(table, target, changing, options));
   const genText = changing.filter(isGenerated);
   if (genText.length) {
     risks.push({ level: 'warn', code: 'generated_columns', message: `มี generated column ที่เป็นข้อความ (${genText.map((c) => c.columnName).join(', ')}) — MySQL อาจปฏิเสธการแปลง ต้อง drop/recreate` });
@@ -345,7 +430,7 @@ function buildPlan({ tables, schemaRows = [], target, options = {}, session = {}
     if (!changing.length && !tableDefaultWrong) continue;
 
     const fqn = qq(table.schemaName, table.tableName);
-    const risks = [...tableRisks(table, target, pick), ...impossibleDdlRisk(opts)];
+    const risks = [...tableRisks(table, target, pick, opts), ...impossibleDdlRisk(opts)];
     if (skipped > 0) {
       risks.push({
         level: 'warn',

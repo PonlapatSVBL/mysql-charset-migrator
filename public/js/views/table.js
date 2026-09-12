@@ -608,6 +608,10 @@ function stepPlan(st, at) {
               <option value="table_copy">ก๊อปตารางไว้ในฐานข้อมูล (ย้อนกลับเร็วสุด)</option>
               <option value="mysqldump">mysqldump ลงไฟล์</option>
             </select></label>
+          <div class="field"><span>&nbsp;</span>
+            <label class="check"><input type="checkbox" id="pl-fkchecks">
+              ปิด FOREIGN_KEY_CHECKS ระหว่างรัน จำเป็นเมื่อคอลัมน์ที่แปลงมี foreign key</label>
+          </div>
         </div>`)}</div>
       <div class="row-tight">
         <button class="btn-primary" id="pl-build">${st.planId ? 'สร้างใหม่' : 'สร้างคำสั่ง'}</button>
@@ -905,6 +909,9 @@ function wirePlan(host) {
         strategy: m === 'table' ? 'convert_table' : 'modify_columns',
         columns: m === 'columns' ? picked() : m === 'defaults' ? [] : undefined,
         backupStrategy: m === 'defaults' ? 'none' : $('#pl-backup', host).value,
+        // Two ends of a text foreign key cannot both be right at once, so
+        // MySQL has to be told to stop looking while they are brought across.
+        disableFkChecks: $('#pl-fkchecks', host).checked,
         includeSchemaDefaults: $('#pl-schemadef', host).checked,
         includeTableDefaults: true,
         order: 'size_asc',

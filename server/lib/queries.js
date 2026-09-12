@@ -514,11 +514,25 @@ async function tablesForPlan(pool, opts) {
     keys
   );
 
+  // Both sides' charset and collation come back with the constraint. MySQL
+  // rejects an ALTER that leaves the two ends of a text foreign key
+  // incompatible, so a plan cannot be judged without knowing what the OTHER
+  // table's column is - and that table is usually not in this query's scope.
   const [fks] = await pool.query(
     `SELECT k.CONSTRAINT_NAME AS name, k.TABLE_SCHEMA AS schemaName, k.TABLE_NAME AS tableName,
             k.COLUMN_NAME AS columnName, k.REFERENCED_TABLE_SCHEMA AS refSchema,
-            k.REFERENCED_TABLE_NAME AS refTable, k.REFERENCED_COLUMN_NAME AS refColumn
+            k.REFERENCED_TABLE_NAME AS refTable, k.REFERENCED_COLUMN_NAME AS refColumn,
+            cc.CHARACTER_SET_NAME AS childCharset, cc.COLLATION_NAME AS childCollation,
+            cc.COLUMN_TYPE AS childType,
+            pc.CHARACTER_SET_NAME AS parentCharset, pc.COLLATION_NAME AS parentCollation,
+            pc.COLUMN_TYPE AS parentType
        FROM information_schema.KEY_COLUMN_USAGE k
+       LEFT JOIN information_schema.COLUMNS cc
+         ON cc.TABLE_SCHEMA = k.TABLE_SCHEMA AND cc.TABLE_NAME = k.TABLE_NAME
+        AND cc.COLUMN_NAME = k.COLUMN_NAME
+       LEFT JOIN information_schema.COLUMNS pc
+         ON pc.TABLE_SCHEMA = k.REFERENCED_TABLE_SCHEMA AND pc.TABLE_NAME = k.REFERENCED_TABLE_NAME
+        AND pc.COLUMN_NAME = k.REFERENCED_COLUMN_NAME
       WHERE k.REFERENCED_TABLE_NAME IS NOT NULL
         AND (CONCAT(k.TABLE_SCHEMA,'.',k.TABLE_NAME) IN (${keyPh})
           OR CONCAT(k.REFERENCED_TABLE_SCHEMA,'.',k.REFERENCED_TABLE_NAME) IN (${keyPh}))`,
