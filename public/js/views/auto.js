@@ -1,14 +1,22 @@
 // The unattended run: its settings before it starts, its progress while it
 // runs, and what it did afterwards.
 //
-// The settings are two numbers because those are the two that decide whether a
-// table is safe to convert without anybody watching. Everything else about the
-// run is the same flow the workspace performs by hand, and is not configurable
-// here on purpose - an unattended run is not the place to loosen a rule.
+// What is on screen unfolded is the four settings that decide WHICH tables run
+// - two limits, how many at a time, and whether to back up first. Everything
+// that decides HOW each table runs is the same advanced options the five steps
+// have, folded away behind the same "ตัวเลือกขั้นสูง" they use, defaulted to
+// exactly what the runner did when they were literals in its code.
+//
+// They are worth having: scanning a table end to end, or skipping the digests
+// taken inside the migration window on a table already proved by hand, are
+// real jobs, and sending an operator back to the one-table page to do them is
+// the feature giving up. The three that loosen a check rather than tune one
+// are treated as such - named in the confirmation, and typed out in full.
 import { api, state } from '../api.js';
 import { navigate } from '../app.js';
 import {
   $, $$, esc, num, bytes, duration, note, chip, toast, confirmDialog, setBusy, applyDynamicStyles,
+  collapse,
 } from '../util.js';
 import { auto, startAuto, stopAuto, applyLimits, outcomeLabel, summarise, MAX_WORKERS } from '../auto.js';
 
@@ -18,15 +26,171 @@ import { auto, startAuto, stopAuto, applyLimits, outcomeLabel, summarise, MAX_WO
 // run should be held to.
 const DEFAULTS = { maxRows: 200000, maxSizeMb: 500, backupStrategy: 'none', concurrency: 1 };
 
+/**
+ * The five steps' advanced options, at the values the runner used to hard-code.
+ *
+ * Changing none of them is the supported path, so every one has a working
+ * value here and none of them can be left empty - `scanRows: 'default'` means
+ * the server's own scan cap, spelled out in the option's label rather than
+ * left as a blank that silently means "no limit".
+ */
+const OPTION_DEFAULTS = {
+  scanRows: 'default', sampleSize: 5, checkUnique: true, checkDoubleEncoding: true,
+  checksumStrategy: 'auto', checksumMode: 'sha256', checksumDeep: false,
+  verifyChecksum: true, autoRollbackOnFailure: true, ignoreLoad: false,
+};
+
+/** The three that loosen a check instead of tuning one. */
+const LOOSENS = ['verifyChecksum', 'autoRollbackOnFailure', 'ignoreLoad'];
+
+/** How each non-default choice reads back to the operator. */
+const OPTION_TEXT = {
+  scanRows: (v) => (v === 'full' ? 'สแกนทั้งตารางทุกตาราง' : `สแกน ${num(Number(v))} แถวแรก`),
+  sampleSize: (v) => `เก็บตัวอย่าง ${num(Number(v))} แถวต่อคอลัมน์`,
+  checkUnique: () => 'ไม่เช็ค UNIQUE index',
+  checkDoubleEncoding: () => 'ไม่เช็ค double-encoding',
+  checksumStrategy: (v) => `baseline: ${CHECKSUM_STRATEGY[v] || v}`,
+  checksumMode: () => 'hash ด้วย crc32 (เร็วกว่า แต่มีโอกาสชนกัน)',
+  checksumDeep: () => 'baseline แยกเก็บทีละคอลัมน์',
+  verifyChecksum: () => 'ไม่ทำ checksum ก่อน/หลังในงาน',
+  autoRollbackOnFailure: () => 'ไม่ย้อนกลับอัตโนมัติเมื่อ checksum ไม่ตรง',
+  ignoreLoad: () => 'ไม่รอให้เซิร์ฟเวอร์ว่างก่อนเริ่ม',
+};
+
+const CHECKSUM_STRATEGY = {
+  auto: 'เลือกให้อัตโนมัติ', full: 'อ่านทั้งตาราง',
+  pk_head: 'สุ่มดูแถวแรกๆ ตาม primary key', rowcount: 'นับแค่จำนวนแถว',
+};
+
+/** The scan cap the server reports, which is what 'default' means. */
+const scanCap = () => (state.meta && state.meta.scan && state.meta.scan.defaultRowLimit) || 200000;
+
 // One page of the work list is the queue, and the server caps a page at 500.
 // A bigger queue is not a bigger run - it is a second run after this one.
 const QUEUE_MAX = 500;
 
-const ui = { ...DEFAULTS, filters: null };
+const ui = { ...DEFAULTS, options: { ...OPTION_DEFAULTS }, filters: null };
 let preview = { eligible: [], excluded: [] };
 
 export function dispose() {
   setBusy(false);
+}
+
+/**
+ * The same advanced options the five steps carry, in the order they run.
+ *
+ * Field for field the controls the one-table page uses, wording included: an
+ * operator who has set "ดูกี่แถว" there should not have to work out that
+ * "ความละเอียดการสแกน" here is the same knob.
+ */
+function advancedBlock() {
+  const o = ui.options;
+  const cap = scanCap();
+  const sel = (v, want) => (String(v) === String(want) ? ' selected' : '');
+  const on = (v) => (v ? ' checked' : '');
+  return collapse('ตัวเลือกขั้นสูง (เหมือนที่มีในแต่ละขั้น)', `
+    <div class="row-tight"><strong class="hint">ขั้น 1 · ตรวจข้อมูล</strong></div>
+    <div class="row">
+      <label class="field"><span>ดูกี่แถว</span>
+        <select id="au-pf-rows">
+          <option value="50000"${sel(o.scanRows, '50000')}>50,000 แถวแรก (เร็วสุด)</option>
+          <option value="default"${sel(o.scanRows, 'default')}>${num(cap)} แถวแรก (ค่าตั้งต้น)</option>
+          <option value="1000000"${sel(o.scanRows, '1000000')}>1,000,000 แถวแรก (ละเอียดขึ้น)</option>
+          <option value="full"${sel(o.scanRows, 'full')}>ทั้งตาราง (ตารางใหญ่จะนานมาก)</option>
+        </select></label>
+      <label class="field"><span>เก็บตัวอย่างกี่แถว</span>
+        <select id="au-pf-samples">${[3, 5, 10, 20].map((n) => `<option${sel(o.sampleSize, n)}>${n}</option>`).join('')}</select></label>
+      <div class="field"><span>&nbsp;</span>
+        <label class="check"><input type="checkbox" id="au-pf-unique"${on(o.checkUnique)}> เช็ค UNIQUE index ด้วย</label>
+        <label class="check"><input type="checkbox" id="au-pf-double"${on(o.checkDoubleEncoding)}> เช็ค double-encoding ด้วย</label>
+      </div>
+    </div>
+
+    <div class="row-tight"><strong class="hint">ขั้น 2 · เก็บ baseline</strong></div>
+    <div class="row">
+      <label class="field"><span>อ่านแค่ไหน</span>
+        <select id="au-cs-strategy">
+          <option value="auto"${sel(o.checksumStrategy, 'auto')}>ให้เลือกให้ (ตามแต่ละตาราง)</option>
+          <option value="full"${sel(o.checksumStrategy, 'full')}>อ่านทั้งตาราง (แม่นสุด ช้าสุด)</option>
+          <option value="pk_head"${sel(o.checksumStrategy, 'pk_head')}>สุ่มดูแถวแรกๆ ตาม primary key</option>
+          <option value="rowcount"${sel(o.checksumStrategy, 'rowcount')}>นับแค่จำนวนแถว</option>
+        </select></label>
+      <label class="field"><span>วิธี hash</span>
+        <select id="au-cs-mode">
+          <option value="sha256"${sel(o.checksumMode, 'sha256')}>sha256 (แม่นสุด)</option>
+          <option value="crc32"${sel(o.checksumMode, 'crc32')}>crc32 (เร็วกว่า แต่มีโอกาสชนกัน)</option>
+        </select></label>
+      <div class="field"><span>&nbsp;</span>
+        <label class="check"><input type="checkbox" id="au-cs-deep"${on(o.checksumDeep)}> แยกเก็บทีละคอลัมน์ ช้ากว่าแต่บอกได้ว่าคอลัมน์ไหนเพี้ยน</label>
+      </div>
+    </div>
+    <p class="hint">ขั้น 5 เทียบผลด้วยวิธีเดียวกับที่เก็บ baseline ไว้เสมอ จึงไม่มีอะไรต้องตั้งแยก</p>
+
+    <div class="row-tight"><strong class="hint">ขั้น 4 · รันคำสั่ง</strong></div>
+    <div class="row">
+      <div class="field"><span>&nbsp;</span>
+        <label class="check"><input type="checkbox" id="au-rn-verify"${on(o.verifyChecksum)}> ทำ checksum ก่อน/หลัง แล้วเอามาเทียบ</label>
+        <label class="check"><input type="checkbox" id="au-rn-autorb"${on(o.autoRollbackOnFailure)}> ถ้า checksum ไม่ตรง ให้ย้อนกลับอัตโนมัติ</label>
+        <label class="check"><input type="checkbox" id="au-rn-ignoreload"${on(o.ignoreLoad)}> ไม่ต้องรอให้เซิร์ฟเวอร์ว่าง (ไม่แนะนำ)</label>
+      </div>
+    </div>
+    <p class="hint">ปิด checksum ก่อน/หลังจะประหยัดเวลาช่วงที่ตารางล็อกอยู่ แต่ขั้น 5 ยังเทียบกับ baseline ให้เหมือนเดิม
+      — ที่หายไปคือด่านที่จับได้<strong>ทันที</strong>ว่า step ไหนทำข้อมูลเพี้ยน และการย้อนกลับอัตโนมัติที่ผูกอยู่กับมัน</p>
+    <div class="row-tight">
+      <button class="btn-sm btn-ghost" id="au-opt-reset">คืนค่าตั้งต้นทั้งหมด</button>
+      <span class="hint" id="au-opt-summary"></span>
+    </div>`);
+}
+
+/** What this run does differently from the defaults, in words. */
+function changedOptions(o = ui.options) {
+  return Object.keys(OPTION_DEFAULTS)
+    .filter((k) => String(o[k]) !== String(OPTION_DEFAULTS[k]))
+    .map((k) => ({ key: k, text: OPTION_TEXT[k](o[k]), loosens: LOOSENS.includes(k) }));
+}
+
+function readOptions(host) {
+  const val = (id, fallback) => ($(`#${id}`, host) ? $(`#${id}`, host).value : fallback);
+  const on = (id, fallback) => ($(`#${id}`, host) ? $(`#${id}`, host).checked : fallback);
+  const d = OPTION_DEFAULTS;
+  ui.options = {
+    scanRows: val('au-pf-rows', d.scanRows),
+    sampleSize: Number(val('au-pf-samples', d.sampleSize)) || d.sampleSize,
+    checkUnique: on('au-pf-unique', d.checkUnique),
+    checkDoubleEncoding: on('au-pf-double', d.checkDoubleEncoding),
+    checksumStrategy: val('au-cs-strategy', d.checksumStrategy),
+    checksumMode: val('au-cs-mode', d.checksumMode),
+    checksumDeep: on('au-cs-deep', d.checksumDeep),
+    verifyChecksum: on('au-rn-verify', d.verifyChecksum),
+    autoRollbackOnFailure: on('au-rn-autorb', d.autoRollbackOnFailure),
+    ignoreLoad: on('au-rn-ignoreload', d.ignoreLoad),
+  };
+  return ui.options;
+}
+
+/**
+ * The screen's values, in the shape the five steps actually send.
+ *
+ * 'default' becomes no rowLimit at all - the server's cap - rather than a
+ * number this page would have to keep in step with it.
+ */
+function toRunOptions(o) {
+  const full = o.scanRows === 'full';
+  return {
+    preflight: {
+      rowLimit: full ? 0 : Number(o.scanRows) || undefined,
+      fullScan: full,
+      sampleSize: o.sampleSize,
+      checkUnique: o.checkUnique,
+      checkDoubleEncoding: o.checkDoubleEncoding,
+    },
+    checksum: { strategy: o.checksumStrategy, mode: o.checksumMode, deep: o.checksumDeep },
+    run: {
+      verifyChecksum: o.verifyChecksum,
+      autoRollbackOnFailure: o.autoRollbackOnFailure,
+      ignoreLoad: o.ignoreLoad,
+    },
+  };
 }
 
 export async function render(host, params = {}) {
@@ -58,6 +222,7 @@ export async function render(host, params = {}) {
             <option value="table_copy">ก๊อปตารางไว้ในฐานข้อมูล</option>
           </select></label>
       </div>
+      ${advancedBlock()}
       ${note('info', 'ทำพร้อมกันได้ แต่ ALTER ยังทีละตัว',
     `การสแกนกินเวลาส่วนใหญ่ของตารางเล็ก และสแกนพร้อมกันได้อย่างปลอดภัยเพราะเป็นการอ่านล้วน
        แต่ตอนเขียนข้อมูลจริง ระบบจะปล่อยให้ <strong>ทีละตารางเท่านั้น</strong> เข้า ALTER
@@ -83,7 +248,55 @@ export async function render(host, params = {}) {
   $('#au-backup', host).addEventListener('change', () => { ui.backupStrategy = $('#au-backup', host).value; });
   $('#au-start', host).addEventListener('click', () => begin(host));
 
+  // One listener for the whole advanced block: every control in it is read
+  // together anyway, and the summary underneath has to be right after any of
+  // them moves - a setting that only takes effect on some other event is the
+  // kind nobody trusts.
+  for (const el of $$('#au-pf-rows, #au-pf-samples, #au-pf-unique, #au-pf-double, #au-cs-strategy, #au-cs-mode, #au-cs-deep, #au-rn-verify, #au-rn-autorb, #au-rn-ignoreload', host)) {
+    el.addEventListener('change', () => { readOptions(host); paintOptionSummary(host); });
+  }
+  const reset = $('#au-opt-reset', host);
+  if (reset) {
+    // Written back into the controls rather than re-rendered: a redraw would
+    // fold the block shut under the operator who just opened it.
+    reset.addEventListener('click', (e) => {
+      e.preventDefault();
+      ui.options = { ...OPTION_DEFAULTS };
+      paintOptions(host);
+      paintOptionSummary(host);
+      toast('คืนค่าตั้งต้นของตัวเลือกขั้นสูงแล้ว', 'ok');
+    });
+  }
+  paintOptionSummary(host);
+
   await loadPreview(host);
+}
+
+/** ui.options -> the controls, for the reset button. */
+function paintOptions(host) {
+  const o = ui.options;
+  const val = (id, v) => { const el = $(`#${id}`, host); if (el) el.value = String(v); };
+  const on = (id, v) => { const el = $(`#${id}`, host); if (el) el.checked = !!v; };
+  val('au-pf-rows', o.scanRows);
+  val('au-pf-samples', o.sampleSize);
+  on('au-pf-unique', o.checkUnique);
+  on('au-pf-double', o.checkDoubleEncoding);
+  val('au-cs-strategy', o.checksumStrategy);
+  val('au-cs-mode', o.checksumMode);
+  on('au-cs-deep', o.checksumDeep);
+  on('au-rn-verify', o.verifyChecksum);
+  on('au-rn-autorb', o.autoRollbackOnFailure);
+  on('au-rn-ignoreload', o.ignoreLoad);
+}
+
+/** The one-line "what is different" under the advanced block. */
+function paintOptionSummary(host) {
+  const box = $('#au-opt-summary', host);
+  if (!box) return;
+  const changed = changedOptions();
+  if (!changed.length) { box.textContent = 'ตอนนี้เป็นค่าตั้งต้นทั้งหมด'; box.className = 'hint'; return; }
+  box.textContent = `${changed.length} อย่างต่างจากค่าตั้งต้น: ${changed.map((c) => c.text).join(' · ')}`;
+  box.className = changed.some((c) => c.loosens) ? 'hint warn' : 'hint';
 }
 
 function readLimits(host) {
@@ -95,6 +308,7 @@ function readLimits(host) {
   return {
     maxRows: ui.maxRows, maxSizeMb: ui.maxSizeMb,
     backupStrategy: ui.backupStrategy, concurrency: ui.concurrency,
+    options: toRunOptions(ui.options),
   };
 }
 
@@ -148,7 +362,14 @@ async function loadPreview(host) {
 }
 
 async function begin(host) {
+  readOptions(host);
   const limits = readLimits(host);
+  const changed = changedOptions();
+  // Carried into the run so the progress card can keep saying it: a setting
+  // that only appears in the dialog that started the run is a setting nobody
+  // can check an hour later.
+  limits.optionNotes = changed.map((c) => c.text);
+  const loosened = changed.filter((c) => c.loosens);
   if (!preview.eligible.length) { toast('ไม่มีตารางที่เข้าเกณฑ์', 'warn'); return; }
   if (state.session && state.session.server && state.session.server.readOnly) {
     toast('เซิร์ฟเวอร์อยู่ในโหมด read_only — รัน ALTER ไม่ได้', 'err', 9000);
@@ -159,11 +380,19 @@ async function begin(host) {
     body: `<p>จะไล่ทำทีละตารางด้วยขั้นตอนเดิมครบทุกขั้น และ <strong>เขียนข้อมูลจริง</strong></p>
       <p>ตารางที่ Preflight บล็อก เก็บ baseline ไม่สำเร็จ หรือแผนมีความเสี่ยงระดับ critical
          จะถูกข้ามและรายงานไว้ ไม่มีการบังคับรันข้ามด่านใดๆ</p>
+      ${loosened.length
+    ? note('crit', 'ตัวเลือกขั้นสูงปิดการตรวจบางอย่างไว้',
+      `<ul>${loosened.map((c) => `<li>${esc(c.text)}</li>`).join('')}</ul>
+       ทั้งรอบนี้ทุกตารางจะรันแบบนี้ ไม่ใช่ตารางเดียว`)
+    : changed.length
+      ? note('info', 'ตัวเลือกขั้นสูงที่ต่างจากค่าตั้งต้น',
+        `<ul>${changed.map((c) => `<li>${esc(c.text)}</li>`).join('')}</ul>`)
+      : ''}
       <div class="note note-warn"><strong>ระหว่างรันอย่าปิดหน้านี้</strong>
         หยุดได้ตลอด ตารางที่กำลังทำจะทำต่อจนจบขั้นของมันก่อน</div>`,
     confirmText: 'เริ่มรัน',
     danger: true,
-    requireText: 'RUN',
+    requireText: loosened.length ? 'FORCE' : 'RUN',
   });
   if (!ok) return;
 
@@ -234,6 +463,8 @@ function drawRun(host) {
       </div>
       ${auto.limits && auto.limits.concurrency > 1
     ? `<p class="hint">ทำพร้อมกัน ${num(auto.limits.concurrency)} ตาราง · ALTER ทีละตัว</p>` : ''}
+      ${auto.limits && (auto.limits.optionNotes || []).length
+    ? `<p class="hint warn">ตัวเลือกขั้นสูง: ${esc((auto.limits.optionNotes || []).join(' · '))}</p>` : ''}
       ${auto.active.length ? `<ul class="worklines">${auto.active.map((a) => `
         <li><span class="status-dot ${a.key === auto.altering ? 'running' : 'pending'}"></span>
           <span class="mono">${esc(a.key)}</span>

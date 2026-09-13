@@ -116,6 +116,48 @@ export function applyLimits(rows, limits) {
   return { eligible, excluded };
 }
 
+/**
+ * The advanced options of the five steps, resolved for this run.
+ *
+ * Every one of these used to be a literal in runOne(): sampleSize 5, sha256,
+ * verifyChecksum true, and so on. That was the right default and still is - it
+ * is what the defaults below say - but it left the operator with no way to
+ * scan a table end to end, or to skip the in-window digests on a table they
+ * had already proved, without leaving the unattended run and doing it by hand.
+ *
+ * So the values are read from the settings and the defaults are exactly the
+ * old literals: a run nobody configures behaves exactly as it always did.
+ * Every field is defaulted by value rather than by presence, so a half-filled
+ * settings object cannot quietly turn a check off.
+ */
+export function runSettings(limits) {
+  const opt = (limits && limits.options) || {};
+  const pf = opt.preflight || {};
+  const cs = opt.checksum || {};
+  const run = opt.run || {};
+  return {
+    // rowLimit undefined = the server's own scan cap, which is the default the
+    // whole feature is sized around. 0 is only meaningful with fullScan.
+    preflight: {
+      rowLimit: pf.fullScan === true ? 0 : (Number(pf.rowLimit) || undefined),
+      fullScan: pf.fullScan === true,
+      sampleSize: Number(pf.sampleSize) || 5,
+      checkUnique: pf.checkUnique !== false,
+      checkDoubleEncoding: pf.checkDoubleEncoding !== false,
+    },
+    checksum: {
+      strategy: ['auto', 'full', 'pk_head', 'rowcount'].includes(cs.strategy) ? cs.strategy : 'auto',
+      mode: cs.mode === 'crc32' ? 'crc32' : 'sha256',
+      deep: cs.deep === true,
+    },
+    run: {
+      verifyChecksum: run.verifyChecksum !== false,
+      autoRollbackOnFailure: run.autoRollbackOnFailure !== false,
+      ignoreLoad: run.ignoreLoad === true,
+    },
+  };
+}
+
 const sleep = (ms) => new Promise((r) => { setTimeout(r, ms); });
 
 /** Poll a task to a terminal state, or until the operator stops the run. */
@@ -163,15 +205,15 @@ async function runOne(row) {
   const at = (phase) => { me.phase = phase; notify(); };
   const done = (outcome, reason) => ({ key, outcome, reason, ids });
 
+  const opt = runSettings(auto.limits);
+
   at('อ่านโครงสร้าง');
   const detail = await api.tableDetail(schemaName, tableName);
   if (!detail.facts.needsChange) return done('nothing', 'ตารางนี้ตรง target อยู่แล้ว');
 
   // --- 1 preflight --------------------------------------------------------
   at('ตรวจข้อมูล');
-  const pf = await api.preflight(tableBody(key, {
-    rowLimit: undefined, sampleSize: 5, checkUnique: true, checkDoubleEncoding: true,
-  }));
+  const pf = await api.preflight(tableBody(key, opt.preflight));
   ids.preflightId = pf.id;
   const pfTask = await awaitTask(key, 'preflight', pf.id, api.preflightGet);
   if (pfTask.stoppedByOperator) return done('skipped', 'ผู้ใช้สั่งหยุดระหว่างสแกน');
@@ -186,7 +228,7 @@ async function runOne(row) {
 
   // --- 2 baseline ---------------------------------------------------------
   at('เก็บ baseline');
-  const cs = await api.checksum(tableBody(key, { mode: 'sha256', strategy: 'auto' }));
+  const cs = await api.checksum(tableBody(key, opt.checksum));
   ids.checksumId = cs.id;
   const csTask = await awaitTask(key, 'checksum', cs.id, api.checksumGet);
   if (csTask.stoppedByOperator) return done('skipped', 'ผู้ใช้สั่งหยุดระหว่างเก็บ baseline');
@@ -239,10 +281,16 @@ async function runOne(row) {
       planId,
       preflightId: pf.id,
       snapshotId: cs.id,
-      verifyChecksum: true,
       backupStrategy: auto.limits.backupStrategy || 'none',
-      autoRollbackOnFailure: true,
+      // Not an option: a run that keeps going after a failed step is a run
+      // nobody is watching, doing the thing it just proved it cannot do.
       stopOnError: true,
+      // The job's own before/after digests stay on 'auto' whatever the
+      // baseline uses, because these two run inside the migration window -
+      // an unbounded hash there is downtime, not diligence. Step 5 is where
+      // the operator's choice of thoroughness gets spent.
+      checksumStrategy: 'auto',
+      ...opt.run,
     });
     ids.jobId = job.id;
     return awaitJob(key, job.id);

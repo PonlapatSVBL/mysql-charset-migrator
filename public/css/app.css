@@ -480,6 +480,8 @@ label.check input { width: auto; accent-color: var(--accent); }
 .collist .mono { font-size: var(--t-mini); }
 .hint { color: var(--fg-mute); font-size: var(--t-small); }
 .hint.mono { font-size: var(--t-mini); }
+/* A hint that reports a setting which loosened a check, not just a note. */
+.hint.warn { color: var(--warn-t); }
 
 /* ------------------------------------------------------------------ cards */
 .card {
