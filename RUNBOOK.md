@@ -706,6 +706,7 @@ curl -s "$BASE/api/jobs" \
 | code | ความหมาย | ทำอะไร |
 |---|---|---|
 | `preflight_required` | ไม่ได้แนบ `preflightId` | **กลับไป Phase 3** — อย่าใช้ `acknowledgeNoPreflight: true` เพื่อลัด |
+| `plan_risk_blocked` | แผนมี risk ระดับ `critical` ที่ preflight ตอบให้ไม่ได้ — `fk_charset_mismatch`, `index_too_long`, `row_too_large`, `algorithm_impossible`, `lock_impossible` (ดูรายการเต็มใน `risks[]` ของ response) | อ่าน `risks[].message` แล้ว **แก้ต้นเหตุก่อน** (กรณี FK: รันชุดคำสั่งซ่อมที่หน้าแผนพิมพ์ให้ — drop constraint → แปลงทั้งสองฝั่ง → add กลับ) จากนั้น **สร้างแผนใหม่** เพราะแผนเดิมเก็บสภาพ ณ ตอนสร้างไว้ `forceDespiteRisks: true` = ยอมให้ MySQL ปฏิเสธคำสั่ง (หรือยอมเสียข้อมูล) อย่างจงใจ ถูกบันทึกเป็น `options.forcedRisks` ใน job manifest และ audit `job.plan_risk.override` |
 | `preflight_blocked` | ผล preflight เป็น `gate: block` | **กลับไป Phase 3.2** แก้ข้อมูล แล้วรัน preflight ใหม่ — `forceDespiteBlock: true` = ยอมสูญเสียข้อมูลอย่างจงใจและถูกบันทึกถาวร |
 | `preflight_scope_mismatch` | แผนมีตารางที่ต้อง rebuild แต่ preflight ไม่ได้สแกน (มักเกิดจากตารางที่ถูกข้ามเพราะเกิน `maxScanBytes` หรือ scope ของ preflight แคบกว่าของแผน) | ดูรายชื่อใน `uncovered[]` แล้ว **รัน Preflight ใหม่ให้ครอบคลุม** (ถ้าเป็นตารางใหญ่ ให้เพิ่มเพดาน หรือใช้ `rowLimit` เพื่อสแกนแบบสุ่มตัวอย่างแทนการข้าม) การใช้ `acknowledgeUncoveredTables: true` = รันตารางที่ไม่รู้ว่ามีข้อมูลจะหายหรือไม่ และถูกบันทึกเป็น audit `job.preflight.scope_override` |
 

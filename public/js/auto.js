@@ -116,22 +116,6 @@ export function applyLimits(rows, limits) {
   return { eligible, excluded };
 }
 
-/**
- * The one critical risk a passing preflight has already answered.
- *
- * `lossy_narrowing` fires on every utf8mb4 -> utf8mb3 table, because that is
- * what this tool does: it says characters outside the target would become '?'
- * and that a scan should be run before trusting it. The scan HAS been run by
- * the time a plan exists here, and a gate of anything but 'block' is its
- * answer. Treating it as unresolved would skip every table on the instance,
- * which is not caution - it is the feature refusing to do its job.
- *
- * Nothing else is waived. index_too_long, row_too_large and
- * fk_charset_mismatch all mean MySQL will reject the statement, and no scan
- * speaks to any of them.
- */
-const ANSWERED_BY_PREFLIGHT = new Set(['lossy_narrowing']);
-
 const sleep = (ms) => new Promise((r) => { setTimeout(r, ms); });
 
 /** Poll a task to a terminal state, or until the operator stops the run. */
@@ -231,14 +215,19 @@ async function runOne(row) {
   }));
   ids.planId = planId;
   if (!plan.steps.length) return done('nothing', 'แผนว่าง ไม่มีคำสั่งต้องรัน');
-  const criticals = plan.steps
-    .flatMap((s) => (s.risks || []).filter((r) => r.level === 'critical'))
-    .filter((r) => !ANSWERED_BY_PREFLIGHT.has(r.code));
-  if (criticals.length) {
-    // Everything left is a statement that the ALTER will be rejected or will
-    // lose data. Reading past one is exactly the judgement call this must not
-    // make on its own.
-    return done('skipped', `แผนมีความเสี่ยงระดับ critical: ${[...new Set(criticals.map((r) => r.code))].join(', ')}`);
+  // Which critical risks stop a table is the server's rule, not this file's.
+  // It used to be a Set up here while the API had no equivalent, so the very
+  // plan this refuses could still be run by hand from the table page and
+  // handed to MySQL. `plan.blocking` is that one list, and the API now turns
+  // away the same runs itself.
+  //
+  // Stopping here anyway, rather than letting the run come back 412, keeps the
+  // reason in the report where the operator reads it. Every entry means the
+  // ALTER will be rejected or will lose data, and reading past one is exactly
+  // the judgement call this must not make on its own.
+  const blocking = plan.blocking || [];
+  if (blocking.length) {
+    return done('skipped', `แผนมีความเสี่ยงระดับ critical: ${[...new Set(blocking.map((r) => r.code))].join(', ')}`);
   }
 
   // --- 4 run --------------------------------------------------------------

@@ -533,14 +533,18 @@ router.post('/plan', requireSession, asyncHandler(async (req, res) => {
   const tableMeta = Object.fromEntries(tables.map((t) => [`${t.schemaName}.${t.tableName}`, t]));
   store.writeJson(req.sess, 'plans', id, { id, createdAt: new Date().toISOString(), sessionId: req.sess.id, plan, tableMeta });
   log.auditFor(req.sess, 'plan.created', { planId: id, sessionId: req.sess.id, steps: plan.steps.length, options: plan.options });
-  res.json({ planId: id, plan });
+  res.json({ planId: id, plan: { ...plan, blocking: sqlgen.blockingRisks(plan) } });
 }));
 
 router.get('/plan/:id', requireSession, (req, res) => {
   const hit = store.readJson(req.sess, 'plans', req.params.id);
   if (!hit) return res.status(404).json({ error: foreignOr(req.sess, 'plans', req.params.id, 'แผน') });
   res.json({
-    planId: hit.data.id, plan: hit.data.plan, createdAt: hit.data.createdAt,
+    // Recomputed on read, not stored: a plan saved before a risk check existed
+    // is still judged by today's rule.
+    planId: hit.data.id,
+    plan: { ...hit.data.plan, blocking: sqlgen.blockingRisks(hit.data.plan) },
+    createdAt: hit.data.createdAt,
     connection: hit.data.connection || null, legacy: hit.legacy,
   });
 });
@@ -580,6 +584,35 @@ router.post('/jobs', requireSession, asyncHandler(async (req, res) => {
   }
   if (req.sess.serverInfo.readOnly && !body.dryRun) {
     return res.status(409).json({ error: 'เซิร์ฟเวอร์อยู่ในโหมด read_only — รัน ALTER ไม่ได้' });
+  }
+
+  // Plan gate: the risks the plan itself already stated.
+  //
+  // A preflight reads rows; these are read off the schema, and every one of
+  // them says the statement will be rejected or will lose characters no scan
+  // can see. The unattended runner has always stopped on them - this is the
+  // same rule for a run started by hand, so there are not two standards for
+  // the same plan.
+  //
+  // Still overridable, because a plan is a snapshot: an operator who has since
+  // run the repair script the plan printed (fk_charset_mismatch carries one)
+  // has fixed the thing it names. Re-planning is the cleaner answer and the
+  // message says so, but the escape hatch is real, and audited.
+  if (!body.dryRun) {
+    const blocking = sqlgen.blockingRisks(stored.plan);
+    if (blocking.length && body.forceDespiteRisks !== true) {
+      return res.status(412).json({
+        error: `แผนนี้มีความเสี่ยงระดับ critical ที่ Preflight ตอบให้ไม่ได้ (${[...new Set(blocking.map((r) => r.code))].join(', ')}) `
+          + '— รันไปก็จะถูก MySQL ปฏิเสธ หรือข้อมูลจะเสีย แก้ต้นเหตุแล้วสร้างแผนใหม่ หรือยืนยันด้วย forceDespiteRisks',
+        code: 'plan_risk_blocked',
+        risks: blocking,
+      });
+    }
+    if (blocking.length) {
+      log.auditFor(req.sess, 'job.plan_risk.override', {
+        sessionId: req.sess.id, planId: stored.id, codes: [...new Set(blocking.map((r) => r.code))],
+      });
+    }
   }
 
   // Preflight gate: refuse to run a lossy conversion unless explicitly forced.
@@ -661,6 +694,7 @@ router.post('/jobs', requireSession, asyncHandler(async (req, res) => {
       runner: body.runner || null,
       planId: stored.id,
       forced: body.forceDespiteBlock === true,
+      forcedRisks: body.forceDespiteRisks === true,
     },
   });
   jobs.start(job);

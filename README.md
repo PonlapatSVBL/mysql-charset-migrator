@@ -27,6 +27,7 @@
 > | กลไก | รายละเอียด |
 > |---|---|
 > | **Preflight gate (บังคับ)** | `POST /api/jobs` จะตอบ **HTTP 412** พร้อม code `preflight_required` ถ้าไม่ได้แนบ `preflightId` และตอบ `preflight_blocked` ถ้าผล preflight เป็น `gate: "block"` — ต้องส่ง `acknowledgeNoPreflight: true` / `forceDespiteBlock: true` อย่างจงใจเท่านั้นจึงจะข้ามได้ |
+> | **Plan gate (บังคับ)** | `POST /api/jobs` จะตอบ **HTTP 412** พร้อม code `plan_risk_blocked` ถ้าแผนมี risk ระดับ `critical` ที่ preflight ตอบให้ไม่ได้ (`fk_charset_mismatch`, `index_too_long`, `row_too_large`, `algorithm_impossible`, `lock_impossible`) — พวกนี้อ่านจาก schema ไม่ใช่จากข้อมูล และหมายความว่า MySQL จะปฏิเสธคำสั่งแน่ๆ ต้องส่ง `forceDespiteRisks: true` อย่างจงใจเท่านั้นจึงจะข้ามได้ |
 > | **สแกนหาแถวที่จะเสียหายจริง** | Preflight รัน round-trip `CONVERT` ต่อคอลัมน์ เพื่อ **นับแถวและดึงตัวอย่างค่า** ที่จะกลายเป็น `?` — ก่อนที่จะแตะข้อมูลจริงแม้แถวเดียว |
 > | **Backup ต่อ step** | เลือกได้ `table_copy` (shadow table ใน DB) หรือ `mysqldump` (ไฟล์) โดย backup ถูกสร้าง **ก่อน** `ALTER` ทุกครั้ง |
 > | **Checksum ก่อน/หลัง ทุก step** | ถ้า digest ไม่ตรง จะถือว่า step ล้มเหลว และเข้า auto-rollback ทันที |
@@ -425,7 +426,7 @@ baseline แผน และ job ของตัวเอง สิ่งที�
 | preflight gate = `block` | ข้าม ไม่มี `forceDespiteBlock` |
 | baseline เก็บไม่สำเร็จ | ข้าม — ไม่มีอะไรให้เทียบตอนจบ |
 | ไม่มีคอลัมน์ไหนพิสูจน์ได้ว่าปลอดภัย | ข้าม |
-| แผนมี critical risk | ข้าม (ยกเว้น `lossy_narrowing` ที่ preflight ตอบไปแล้ว — ดูด้านล่าง) |
+| แผนมี critical risk (`plan.blocking` ไม่ว่าง) | ข้าม (ยกเว้น `lossy_narrowing` ที่ preflight ตอบไปแล้ว — ดูด้านล่าง) |
 | job จบไม่ใช่ `done` | บันทึกว่าล้มเหลว ไปตัวถัดไป (rollback ต่อ step ทำงานตามปกติ) |
 | verify ไม่ตรง | บันทึกว่า "ต้องดูเอง" ไม่ย้อนกลับให้เอง |
 
@@ -434,6 +435,11 @@ baseline แผน และ job ของตัวเอง สิ่งที�
 **สแกนไปแล้ว** และ gate ที่ไม่ใช่ `block` คือคำตอบของมัน ถ้าไม่ยกเว้นตัวนี้ ระบบจะข้ามทุกตารางบนเครื่อง
 ซึ่งไม่ใช่ความระมัดระวัง แต่คือฟีเจอร์ที่ปฏิเสธจะทำงาน ส่วน `index_too_long`, `row_too_large`,
 `fk_charset_mismatch` ไม่เคยถูกยกเว้น — ทั้งสามแปลว่า MySQL จะปฏิเสธคำสั่ง และไม่มีการสแกนไหนตอบแทนได้
+
+กติกาข้อนี้เคยอยู่ในไฟล์ของ Auto run ไฟล์เดียว ส่วน API ไม่มีอะไรเทียบเท่า — แผนที่ Auto run ไม่ยอมแตะ
+จึงยังรันด้วยมือจากหน้า Table ได้ และถูกส่งให้ MySQL ปฏิเสธจริงๆ มาแล้ว ตอนนี้กติกาอยู่ที่
+`sqlgen.blockingRisks()` ฝั่งเซิร์ฟเวอร์ที่เดียว: API ปฏิเสธเองด้วย `plan_risk_blocked`
+และส่งรายการเดียวกันกลับมากับแผนในชื่อ `plan.blocking` ให้ทั้งสองหน้าจออ่าน
 
 **ทำพร้อมกันได้ 1–3 ตาราง (ตั้งต้น 1) แต่ ALTER ยังทีละตัว** — การสแกน (preflight + checksum สองรอบต่อตาราง)
 เป็นการอ่านล้วนและกินเวลาส่วนใหญ่ของตารางเล็ก จึงทำพร้อมกันได้ปลอดภัย ส่วนช่วงเขียนข้อมูลจริง
@@ -476,6 +482,12 @@ Referencing column 'external_training_request_id' and referenced column
 เครื่องมือนี้ดึง charset/collation ของ **ทั้งสองฝั่ง** มาตอนสร้างแผน (`queries.tablesForPlan` join
 `information_schema.COLUMNS` สองครั้ง) จึงบอกได้ก่อนรันว่าคำสั่งนี้จะถูกปฏิเสธหรือไม่ ไม่ใช่เตือนลอยๆ ว่า
 "มี FK นะ" เหมือนเดิม
+
+และการ "บอกได้" นั้นมีผลจริง: `POST /api/jobs` ปฏิเสธแผนที่ยังมี `fk_charset_mismatch` ด้วย
+**412 `plan_risk_blocked`** — วิธีที่ถูกต้องคือรันชุดคำสั่งซ่อมข้างบนให้จบ แล้ว **สร้างแผนใหม่**
+(แผนเก็บสภาพ ณ ตอนที่สร้าง ตัวเก่าจะยังถือ risk เดิมไว้) ถ้าจำเป็นต้องข้ามจริงๆ ต้องส่ง
+`forceDespiteRisks: true` ซึ่งถูกบันทึกไว้ทั้งใน job manifest (`options.forcedRisks`) และ audit
+`job.plan_risk.override`
 
 **ทำไมต้องดูจำนวนแถวด้วย ไม่ใช่แค่ขนาด** — ตารางแคบๆ ที่มี 3.6 ล้านแถวกินพื้นที่ไม่ถึงเพดาน 2 GB
 แต่ใช้เวลา hash นานเกิน `scan.statementTimeoutSec` (60 วินาที) แล้ว digest ก็ถูก MySQL ตัดทิ้งกลางคัน
@@ -732,13 +744,17 @@ flag ของ mysqldump ที่ใช้: `--single-transaction --quick --hex
 ถ้า dryRun                                          → ข้าม gate ทั้งหมด
 ถ้าไม่มี preflightResult และ acknowledgeNoPreflight ≠ true
                                                     → 412 code: "preflight_required"
+ถ้าแผนมี critical risk ที่ preflight ตอบไม่ได้ และ forceDespiteRisks ≠ true
+                                                    → 412 code: "plan_risk_blocked" (+ risks[])
 ถ้า preflightResult.gate === 'block' และ forceDespiteBlock ≠ true
                                                     → 412 code: "preflight_blocked" (+ summary)
 ถ้ามีตาราง rebuild ที่ preflight ไม่ได้สแกน และ acknowledgeUncoveredTables ≠ true
                                                     → 412 code: "preflight_scope_mismatch" (+ uncovered[], uncoveredCount)
 ```
 
-`options.forced` ถูกบันทึกเป็น `true` ใน job manifest และ audit `job.created` เมื่อใช้ `forceDespiteBlock` — ทำให้การข้าม gate ตรวจสอบย้อนหลังได้
+`options.forced` ถูกบันทึกเป็น `true` ใน job manifest และ audit `job.created` เมื่อใช้ `forceDespiteBlock` — ทำให้การข้าม gate ตรวจสอบย้อนหลังได้ เช่นเดียวกับ `options.forcedRisks` เมื่อใช้ `forceDespiteRisks` ซึ่งเขียน audit `job.plan_risk.override` ไว้อีกชั้นพร้อมรายการ risk code ที่ถูกข้าม
+
+รายการ risk ที่ gate นี้ใช้มาจาก `sqlgen.blockingRisks()` ที่เดียว และถูกส่งกลับไปกับแผนในชื่อ `plan.blocking` ทั้งที่ `POST /api/plan` และ `GET /api/plan/:id` — หน้า Table กับ Auto run จึงอ่านกติกาเดียวกับที่ API บังคับ ไม่ใช่สำเนาของตัวเอง
 
 ```bash
 # ตัวอย่างเรียก job ปกติ (ผ่าน gate ด้วย preflightId)

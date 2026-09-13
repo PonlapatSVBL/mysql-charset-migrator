@@ -942,6 +942,12 @@ async function startRun(host, dryRun) {
   // than letting the operator hit a 412 they cannot interpret.
   const unscanned = st.preflightScanned === false;
 
+  // The critical risks the plan itself stated and no scan can answer - the
+  // server refuses these too. Named one by one in the dialog, because "the
+  // plan has a critical risk" is not something an operator can act on, while
+  // "the other end of this foreign key is still utf8mb4" is.
+  const blocking = plan.blocking || [];
+
   if (!dryRun) {
     const ok = await confirmDialog({
       title: `รันจริงกับตาราง ${key}`,
@@ -949,6 +955,11 @@ async function startRun(host, dryRun) {
         ${note('warn', null, `จะรัน ${num(plan.steps.length)} คำสั่งกับ <code>${esc(key)}</code>
           เขียนข้อมูลใหม่ราวๆ ${bytes(plan.summary.rebuildBytes)}
           ระหว่างนั้นตารางนี้ <strong>อ่านได้ แต่เขียนไม่ได้</strong>`)}
+        ${blocking.length
+    ? note('crit', 'แผนบอกไว้แล้วว่าคำสั่งนี้จะไม่ผ่าน',
+      `<ul>${blocking.slice(0, 5).map((r) => `<li>${esc(r.message)}</li>`).join('')}</ul>
+       แก้ต้นเหตุแล้วสร้างคำสั่งใหม่ที่ขั้น 3 ดีกว่า — แผนนี้เก็บสภาพตอนที่สร้างไว้`)
+    : ''}
         ${st.preflightGate === 'block'
     ? note('crit', 'ขั้น 1 ตีกลับไว้', 'ข้อมูลจะเสียถาวร และย้อนกลับไม่ได้')
     : unscanned
@@ -956,7 +967,7 @@ async function startRun(host, dryRun) {
       : ''}`,
       confirmText: 'รันจริง',
       danger: true,
-      requireText: st.preflightGate === 'block' || unscanned ? 'FORCE' : 'RUN',
+      requireText: st.preflightGate === 'block' || unscanned || blocking.length ? 'FORCE' : 'RUN',
     });
     if (!ok) return;
   }
@@ -973,6 +984,7 @@ async function startRun(host, dryRun) {
     stopOnError: true,
     ignoreLoad: $('#rn-ignoreload', host) ? $('#rn-ignoreload', host).checked : false,
     forceDespiteBlock: st.preflightGate === 'block',
+    forceDespiteRisks: blocking.length > 0,
     acknowledgeUncoveredTables: unscanned,
   };
 

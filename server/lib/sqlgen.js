@@ -420,6 +420,50 @@ function tableRisks(table, target, pick = null, options = {}) {
   return risks;
 }
 
+/**
+ * The one critical risk a passing preflight has already answered.
+ *
+ * `lossy_narrowing` fires on every utf8mb4 -> utf8mb3 table, because that is
+ * what this tool does: it says characters outside the target would become '?'
+ * and that a scan should be run before trusting it. A preflight whose gate is
+ * anything but 'block' IS that answer. Treating it as unresolved would refuse
+ * every table on the instance, which is not caution - it is the feature
+ * refusing to do its job.
+ *
+ * Nothing else is waived. index_too_long, row_too_large, fk_charset_mismatch,
+ * algorithm_impossible and lock_impossible all mean MySQL will reject the
+ * statement outright, and no amount of scanning rows speaks to any of them.
+ */
+const ANSWERED_BY_PREFLIGHT = new Set(['lossy_narrowing']);
+
+/**
+ * The critical risks in a plan that nothing has answered.
+ *
+ * This is the list that stops a run, so it lives here rather than in each
+ * caller: the unattended runner used to keep its own copy of the rule while
+ * the API kept none, which is how a plan carrying a fk_charset_mismatch - the
+ * repair script already written out beside it - was handed to MySQL anyway and
+ * came back rejected.
+ *
+ * Computed from the steps every time rather than read off a stored field, so a
+ * plan written before this existed is judged by today's rule.
+ */
+function blockingRisks(plan) {
+  const out = [];
+  for (const s of (plan && plan.steps) || []) {
+    for (const r of s.risks || []) {
+      if (r.level !== 'critical' || ANSWERED_BY_PREFLIGHT.has(r.code)) continue;
+      out.push({
+        code: r.code,
+        message: r.message,
+        step: s.id,
+        table: s.tableName ? `${s.schemaName}.${s.tableName}` : null,
+      });
+    }
+  }
+  return out;
+}
+
 function ptOscCommand(table, target, session) {
   const alter = `CONVERT TO CHARACTER SET ${target.charset} COLLATE ${target.collation}`;
   return [
@@ -670,5 +714,5 @@ function renderScript(plan, direction = 'forward') {
 module.exports = {
   buildPlan, renderScript, columnDefinition, defaultClause, tableRisks,
   needsColumnChange, sessionGuards, alterSuffix, impossibleDdlRisk, bpc, indexByteLimit,
-  repertoireFits,
+  repertoireFits, ANSWERED_BY_PREFLIGHT, blockingRisks,
 };
